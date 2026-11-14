@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>数据备份中心</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --line: #262b36;
+    --text: #e6e9ef;
+    --muted: #8b94a7;
+    --accent: #4c8dff;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    padding: 20px 16px calc(32px + env(safe-area-inset-bottom));
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 4px 0 2px; letter-spacing: .3px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .stats { display: flex; gap: 10px; }
+  .stat { flex: 1; min-width: 0; }
+  .stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  button {
+    width: 100%;
+    border: 0;
+    border-radius: 11px;
+    padding: 13px;
+    font-size: 15px;
+    font-weight: 600;
+    font-family: inherit;
+    color: #fff;
+    background: var(--accent);
+    cursor: pointer;
+  }
+  button:active { opacity: .82; }
+  button:disabled { opacity: .5; }
+  button.ghost {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-weight: 500;
+  }
+  .row { display: flex; gap: 10px; margin-top: 10px; }
+  .row > * { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+  input[type="search"] {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: #0b0d11;
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+  input[type="search"]:focus { outline: none; border-color: var(--accent); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    border-top: 1px solid var(--line);
+    padding: 11px 0;
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+  }
+  li:first-child { border-top: 0; }
+  .k {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    color: var(--accent);
+    word-break: break-all;
+    flex: 1;
+  }
+  .v {
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: calc(24px + env(safe-area-inset-bottom));
+    transform: translate(-50%, 20px);
+    background: #2b3242;
+    border: 1px solid var(--line);
+    color: var(--text);
+    padding: 10px 16px;
+    border-radius: 10px;
+    font-size: 13px;
+    opacity: 0;
+    pointer-events: none;
+    transition: .22s ease;
+    max-width: calc(100% - 32px);
+    text-align: center;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>数据备份中心</h1>
+  <div class="sub" id="origin"></div>
+
+  <div class="card">
+    <div class="stats">
+      <div class="stat"><b id="count">0</b><span>数据项</span></div>
+      <div class="stat"><b id="size">0 B</b><span>占用大小</span></div>
+      <div class="stat"><b id="idbCount">–</b><span>本地数据库</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <button id="btnBackup">一键备份全部数据</button>
+    <div class="row">
+      <button class="ghost" id="btnRestore">从文件恢复</button>
+      <button class="ghost" id="btnCopy">复制 JSON</button>
+    </div>
+    <input type="file" id="file" accept="application/json,.json" hidden>
+    <p class="hint">备份包含 localStorage 与 IndexedDB；API Key 不写入备份，恢复时保留本机已有的 Key。</p>
+  </div>
+
+  <div class="card">
+    <input type="search" id="filter" placeholder="筛选数据项…">
+    <ul id="list"></ul>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  var INTERNAL = ['__autoBackupAt', '__lastBackupAt'];
+  var IDB_FALLBACK = ['yebian-db'];
+
+  // 备份时剔除的敏感字段：键名 → 字段名
+  var REDACT = { 'yebian.settings.v1': ['apiKey'] };
+  var REDACTED = ['yebian.settings.v1.apiKey'];
+
+  function redactValue(key, raw) {
+    var fields = REDACT[key];
+    if (!fields || typeof raw !== 'string') return raw;
+    try {
+      var obj = JSON.parse(raw);
+      fields.forEach(function (f) { delete obj[f]; });
+      return JSON.stringify(obj);
+    } catch (e) {
+      return raw;
+    }
+  }
+
+  // 恢复时保留本机已有的敏感字段，避免把 API Key 清空
+  function mergeSecret(key, incoming) {
+    var fields = REDACT[key];
+    if (!fields) return incoming;
+    var current = localStorage.getItem(key);
+    if (!current) return incoming;
+    try {
+      var oldObj = JSON.parse(current);
+      var newObj = JSON.parse(incoming);
+      fields.forEach(function (f) {
+        if (oldObj[f] !== undefined && oldObj[f] !== '') newObj[f] = oldObj[f];
+      });
+      return JSON.stringify(newObj);
+    } catch (e) {
+      return incoming;
+    }
+  }
+  var $ = function (id) { return document.getElementById(id); };
+  var toastTimer = null;
+
+  function toast(msg) {
+    var el = $('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove('show'); }, 2600);
+  }
+
+  /* ---------------- localStorage ---------------- */
+
+  function snapshot() {
+    var data = {};
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (INTERNAL.indexOf(k) !== -1) continue;
+      data[k] = redactValue(k, localStorage.getItem(k));
+    }
+    return data;
+  }
+
+  function byteSize(str) {
+    return new Blob([str]).size;
+  }
+
+  function fmt(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  }
+
+  function stamp() {
+    var d = new Date();
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      '-' + p(d.getHours()) + p(d.getMinutes());
+  }
+
+  function download(text, filename) {
+    var blob = new Blob([text], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      URL.revokeObjectURL(url);
+      a.remove();
+    }, 2000);
+  }
+
+  /* ---------------- IndexedDB ---------------- */
+
+  function openDb(name, createMeta) {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open(name);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!createMeta) return;
+        Object.keys(createMeta.stores || {}).forEach(function (s) {
+          if (db.objectStoreNames.contains(s)) return;
+          var m = createMeta.stores[s];
+          var opts = { autoIncrement: !!m.autoIncrement };
+          if (m.keyPath) opts.keyPath = m.keyPath;
+          db.createObjectStore(s, opts);
+        });
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+      req.onblocked = function () { reject(new Error('数据库被其他标签页占用')); };
+    });
+  }
+
+  function readStore(db, storeName) {
+    return new Promise(function (resolve, reject) {
+      var t = db.transaction(storeName, 'readonly');
+      var os = t.objectStore(storeName);
+      var meta = {
+        keyPath: os.keyPath,
+        autoIncrement: os.autoIncrement,
+        records: []
+      };
+      var req = os.openCursor();
+      req.onsuccess = function () {
+        var c = req.result;
+        if (c) {
+          meta.records.push({ k: c.primaryKey, v: c.value });
+          c.continue();
+        } else {
+          resolve(meta);
+        }
+      };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+
+  function listDbNames() {
+    if (indexedDB.databases) {
+      return indexedDB.databases().then(function (list) {
+        return (list || []).map(function (d) { return d.name; }).filter(Boolean);
+      }).catch(function () { return IDB_FALLBACK; });
+    }
+    return Promise.resolve(IDB_FALLBACK);
+  }
+
+  function dumpIndexedDB() {
+    if (!window.indexedDB) return Promise.resolve({});
+    return listDbNames().then(function (names) {
+      var out = {};
+      return names.reduce(function (chain, name) {
+        return chain.then(function () {
+          return openDb(name).then(function (db) {
+            var storeNames = Array.prototype.slice.call(db.objectStoreNames);
+            var stores = {};
+            return storeNames.reduce(function (inner, s) {
+              return inner.then(function () {
+                return readStore(db, s).then(function (m) { stores[s] = m; });
+              });
+            }, Promise.resolve()).then(function () {
+              out[name] = { version: db.version, stores: stores };
+              db.close();
+            });
+          }).catch(function () { /* 单个库失败不影响其他库 */ });
+        });
+      }, Promise.resolve()).then(function () { return out; });
+    });
+  }
+
+  function writeStore(db, storeName, meta) {
+    return new Promise(function (resolve, reject) {
+      var t = db.transaction(storeName, 'readwrite');
+      var os = t.objectStore(storeName);
+      os.clear();
+      (meta.records || []).forEach(function (r) {
+        if (os.keyPath) os.put(r.v);
+        else os.put(r.v, r.k);
+      });
+      t.oncomplete = function () { resolve(); };
+      t.onerror = function () { reject(t.error); };
+      t.onabort = function () { reject(t.error); };
+    });
+  }
+
+  function openForRestore(name, meta) {
+    return openDb(name).then(function (db) {
+      var missing = Object.keys(meta.stores || {}).filter(function (s) {
+        return !db.objectStoreNames.contains(s);
+      });
+      if (!missing.length) return db;
+
+      var nextVersion = db.version + 1;
+      db.close();
+      return new Promise(function (resolve, reject) {
+        var req = indexedDB.open(name, nextVersion);
+        req.onupgradeneeded = function () {
+          var d = req.result;
+          missing.forEach(function (s) {
+            var m = meta.stores[s];
+            var opts = { autoIncrement: !!m.autoIncrement };
+            if (m.keyPath) opts.keyPath = m.keyPath;
+            d.createObjectStore(s, opts);
+          });
+        };
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { reject(req.error); };
+        req.onblocked = function () { reject(new Error('数据库被其他标签页占用')); };
+      });
+    });
+  }
+
+  function restoreIndexedDB(snapshot) {
+    var names = Object.keys(snapshot || {});
+    return names.reduce(function (chain, name) {
+      return chain.then(function () {
+        var meta = snapshot[name];
+        return openForRestore(name, meta).then(function (db) {
+          var stores = Object.keys(meta.stores || {});
+          return stores.reduce(function (inner, s) {
+            return inner.then(function () { return writeStore(db, s, meta.stores[s]); });
+          }, Promise.resolve()).then(function () { db.close(); });
+        });
+      });
+    }, Promise.resolve());
+  }
+
+  /* ---------------- 导出与恢复 ---------------- */
+
+  function buildPayload(idb) {
+    var data = snapshot();
+    return {
+      exportedAt: new Date().toISOString(),
+      origin: location.origin,
+      count: Object.keys(data).length,
+      data: data,
+      indexedDB: idb || {},
+      redacted: REDACTED
+    };
+  }
+
+  function render() {
+    var data = snapshot();
+    var keys = Object.keys(data);
+    var total = 0;
+    var kw = $('filter').value.trim().toLowerCase();
+    var list = $('list');
+    list.innerHTML = '';
+
+    var shown = 0;
+    keys.sort().forEach(function (k) {
+      var v = data[k] || '';
+      total += byteSize(k) + byteSize(v);
+      if (kw && k.toLowerCase().indexOf(kw) === -1) return;
+      shown++;
+      var li = document.createElement('li');
+      var name = document.createElement('span');
+      name.className = 'k';
+      name.textContent = k;
+      var meta = document.createElement('span');
+      meta.className = 'v';
+      meta.textContent = fmt(byteSize(v));
+      li.appendChild(name);
+      li.appendChild(meta);
+      list.appendChild(li);
+    });
+
+    if (!shown) {
+      var empty = document.createElement('li');
+      empty.className = 'empty';
+      empty.textContent = keys.length ? '没有匹配的数据项' : '当前站点还没有数据';
+      list.appendChild(empty);
+    }
+
+    $('count').textContent = keys.length;
+    $('size').textContent = fmt(total);
+    $('origin').textContent = location.host;
+  }
+
+  function refreshIdbCount() {
+    if (!window.indexedDB) { $('idbCount').textContent = '0'; return; }
+    listDbNames().then(function (names) {
+      $('idbCount').textContent = names.length;
+    }).catch(function () { $('idbCount').textContent = '?'; });
+  }
+
+  $('btnBackup').addEventListener('click', function () {
+    var btn = $('btnBackup');
+    btn.disabled = true;
+    toast('正在读取数据…');
+    dumpIndexedDB().then(function (idb) {
+      var payload = buildPayload(idb);
+      if (!payload.count && !Object.keys(idb).length) return toast('当前没有可备份的数据');
+      var text = JSON.stringify(payload, null, 2);
+      download(text, 'all-backup-' + stamp() + '.json');
+      toast('已导出 ' + payload.count + ' 项，' + fmt(byteSize(text)));
+    }).catch(function (e) {
+      toast('备份失败：' + (e && e.message ? e.message : e));
+    }).then(function () {
+      btn.disabled = false;
+    });
+  });
+
+  $('btnCopy').addEventListener('click', function () {
+    dumpIndexedDB().then(function (idb) {
+      var payload = buildPayload(idb);
+      if (!payload.count && !Object.keys(idb).length) return toast('当前没有可备份的数据');
+      var text = JSON.stringify(payload, null, 2);
+      if (!navigator.clipboard) return toast('此浏览器不支持复制，请用备份按钮');
+      return navigator.clipboard.writeText(text).then(function () {
+        toast('已复制 ' + fmt(byteSize(text)) + ' 的数据');
+      }).catch(function () {
+        toast('复制失败，请改用备份按钮');
+      });
+    });
+  });
+
+  $('btnRestore').addEventListener('click', function () { $('file').click(); });
+
+  $('file').addEventListener('change', function (e) {
+    var file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+
+    file.text().then(function (text) {
+      var obj;
+      try { obj = JSON.parse(text); } catch (err) { return toast('文件不是合法的 JSON'); }
+
+      var data = obj && obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data)
+        ? obj.data : obj;
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return toast('无法识别的备份格式');
+
+      var keys = Object.keys(data);
+      var dbs = obj && obj.indexedDB ? Object.keys(obj.indexedDB) : [];
+      if (!keys.length && !dbs.length) return toast('备份里没有数据');
+
+      var when = obj.exportedAt ? new Date(obj.exportedAt).toLocaleString() : '未知时间';
+      var ok = confirm(
+        '将写入 ' + keys.length + ' 个数据项' +
+        (dbs.length ? '、覆盖 ' + dbs.length + ' 个数据库' : '') +
+        '。\n\n来源站点：' + (obj.origin || '未知') +
+        '\n备份时间：' + when + '\n\n确定恢复？'
+      );
+      if (!ok) return;
+
+      try {
+        keys.forEach(function (k) { localStorage.setItem(k, mergeSecret(k, data[k])); });
+      } catch (err) {
+        return toast('写入 localStorage 失败：' + err.message);
+      }
+
+      restoreIndexedDB(obj.indexedDB || {}).then(function () {
+        render();
+        refreshIdbCount();
+        toast('已恢复 ' + keys.length + ' 项，刷新页面后生效');
+      }).catch(function (e) {
+        render();
+        toast('部分数据库恢复失败：' + (e && e.message ? e.message : e));
+      });
+    });
+  });
+
+  $('filter').addEventListener('input', render);
+
+  render();
+  refreshIdbCount();
+})();
+</script>
+</body>
+</html>
