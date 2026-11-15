@@ -154,10 +154,16 @@
     </button>`;
   }
 
+  let lastRenderedTab = null;
+
   function render() {
     document.querySelectorAll('.desktop-nav button, .bottom-nav button').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.tab === ui.tab);
     });
+    // 只有切换页面时才播放入场动画；评分、改期等数据更新就地重绘，避免整页闪烁
+    const animate = lastRenderedTab !== ui.tab;
+    lastRenderedTab = ui.tab;
+    main.classList.toggle('no-anim', !animate);
     document.getElementById('level-chip').innerHTML = levelChipHTML();
     if (ui.tab === 'today') main.innerHTML = renderToday();
     else if (ui.tab === 'calendar') main.innerHTML = renderCalendar();
@@ -706,8 +712,9 @@
               <span>最近保存 ${formatUpdated(state.meta.updatedAt)}</span>
               <span>北京时间</span>
             </div>
+            <p class="field-hint" style="margin:2px 0 0">每天首次打开会自动保存一条「自动备份」；导入、恢复、清空、重置前也会各备份一次。最多保留 7 条，存在当前浏览器里。</p>
             <div class="backup-list">
-              ${backups.length ? backups.slice(0, 4).map((b) => `<div class="backup-row">
+              ${backups.length ? backups.slice(0, 7).map((b) => `<div class="backup-row">
                 ${icon('shield')}
                 <div class="bmeta"><b>${esc(b.label)}</b><span>${formatBackupTime(b.at)} · ${b.state && b.state.entries ? b.state.entries.length : 0} 项计划</span></div>
                 <button class="text-btn" data-action="restore-backup" data-backup="${b.id}">恢复</button>
