@@ -528,7 +528,8 @@
     const badges = C.computeBadges(state);
     const unlocked = badges.filter((b) => b.unlocked).length;
 
-    const programCards = state.programs.map((program) => {
+    const activePrograms = state.programs.filter((program) => !program.archived);
+    const programCards = activePrograms.map((program) => {
       const phases = program.phases || [];
       const avg = yearProgramAverage(program, year);
       const phaseRows = phases.map((phase) => {
@@ -619,7 +620,7 @@
       </div>
 
       <div class="section-head"><div><h2>项目进展</h2><p>阶段进度由计划日与完成质量共同计算，未安排的天不会被虚假填满。</p></div></div>
-      <div class="program-stats">${programCards}</div>
+      <div class="program-stats">${programCards || '<p class="field-hint">项目都归档了，可以在设置的「已归档」里恢复。全年总览仍保留它们的历史记录。</p>'}</div>
 
       ${heatmapCard}
 
@@ -819,7 +820,7 @@
         <button class="btn btn-primary btn-sm" data-action="open-ai-plan">${icon('spark')} 生成训练计划</button>
       </div>
       ${planRows ? `<div class="ai-plan-list"><span class="ai-plan-list-title">最近的 AI 计划</span>${planRows}</div>` : ''}
-      <p class="field-hint" style="margin-top:10px">模型会自己决定课型（轻松跑、节奏跑、间歇、长距离、力量）与内容，程序只负责给可选日期和跑量参考，并按规则校验。写入前请检查强度。<span class="ai-ver">AI 模块 ${esc(api && api.VERSION ? api.VERSION : '—')}</span></p>
+      <p class="field-hint" style="margin-top:10px">模型会自己决定课型（轻松跑、节奏跑、间歇、长距离、力量）与内容，程序只负责给可选日期和跑量参考，并按规则校验。写入前请检查强度。</p>
     </section>`;
   }
 
