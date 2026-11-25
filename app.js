@@ -1003,18 +1003,39 @@
     };
   }
 
+  let aiLoadingTimer = null;
+
+  function stopAILoadingTimer() {
+    if (aiLoadingTimer) {
+      clearInterval(aiLoadingTimer);
+      aiLoadingTimer = null;
+    }
+  }
+
   function renderAIPlanLoading() {
+    stopAILoadingTimer();
     const html = `<div class="modal ai-modal" id="ai-plan-modal">
       ${modalHead('AI 正在排训练计划', '正在按目标、日期和可训练时间逐周安排…')}
       <div class="modal-body">
         <div class="ai-loading">
           <span class="ai-spinner"></span>
-          <b>通常需要 30–60 秒</b>
-          <p>模型会先排出每周训练，再逐条校验日期、频次、跑量增幅与减量周。校验不通过时不会写入。</p>
+          <b>已等待 <span id="ai-elapsed">0</span> 秒</b>
+          <span class="ai-stage" id="ai-stage">正在生成完整计划</span>
+          <p>计划较长时通常需要 1–3 分钟。若整份生成失败，会自动改为分段生成；请不要关闭页面。</p>
         </div>
       </div>
     </div>`;
     openModal(html, { type: 'ai-plan' });
+
+    const startedAt = Date.now();
+    aiLoadingTimer = setInterval(() => {
+      const el = document.getElementById('ai-elapsed');
+      if (!el) {
+        stopAILoadingTimer();
+        return;
+      }
+      el.textContent = String(Math.round((Date.now() - startedAt) / 1000));
+    }, 1000);
   }
 
   function runAIPlanGeneration() {
@@ -1048,10 +1069,20 @@
     const api = aiApi();
     aiDraft = { input, plan: null, validation: null };
     renderAIPlanLoading();
-    api.generatePlan(input).then((result) => {
+    const onStage = (stage) => {
+      const el = document.getElementById('ai-stage');
+      if (!el || !stage) return;
+      if (stage.stage === 'chunk') {
+        el.textContent = `整份生成未成功，正在分段生成：第 ${stage.index}/${stage.total} 段`;
+      } else {
+        el.textContent = '正在生成完整计划';
+      }
+    };
+    api.generatePlan(input, onStage).then((result) => {
       if (!document.getElementById('ai-plan-modal')) return;
-      aiDraft = { input, plan: result.plan, validation: result.validation };
+      aiDraft = { input, plan: result.plan, validation: result.validation, mode: result.mode };
       renderAIPlanPreview();
+      if (result.mode === 'chunked') showToast('整份生成未成功，已改用分段生成完成。', 'info');
     }).catch((err) => {
       if (!document.getElementById('ai-plan-modal')) return;
       aiDraft = null;
@@ -1083,6 +1114,7 @@
 
   function renderAIPlanPreview() {
     if (!aiDraft || !aiDraft.plan) return;
+    stopAILoadingTimer();
     const { plan, validation, input } = aiDraft;
     const stats = validation.stats || { weeks: 0, sessions: 0, totalKm: 0, peakWeekKm: 0 };
     const weeks = validation.weeks || [];
@@ -1292,6 +1324,7 @@
   }
 
   function closeModal() {
+    stopAILoadingTimer();
     ui.modal = null;
     modalRoot.innerHTML = '';
     document.body.style.overflow = '';

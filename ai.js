@@ -106,7 +106,19 @@
 
   /* ---------------- 模型调用 ---------------- */
 
-  async function chatRaw(options) {
+  const NETWORK_HINT = '网络连接中断（Failed to fetch）：模型生成时间较长时，连接可能被浏览器或网络掐断。已自动重试，如仍失败请换一个网络（Wi‑Fi 与流量互换）或稍后再试。';
+  const IDLE_TIMEOUT = 90000;
+  const TOTAL_TIMEOUT = 300000;
+
+  function taggedError(message, kind) {
+    const err = new Error(message);
+    err.kind = kind;
+    return err;
+  }
+
+  function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+  function resolveEndpoint(options) {
     const s = (options && options.settings) || loadSettings();
     const apiKey = String(s.apiKey || '').trim();
     if (!apiKey) throw new Error('还没有填写 DeepSeek API Key，请先到设置里保存。');
@@ -114,59 +126,239 @@
     const model = String(s.model || DEFAULT_SETTINGS.model).trim();
     if (!baseUrl || !model) throw new Error('接口地址或模型名没有填完整，请到设置里检查。');
     if (!/^https?:\/\//i.test(baseUrl)) throw new Error('接口地址需要以 http:// 或 https:// 开头。');
+    return { apiKey, baseUrl, model };
+  }
 
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 120000);
+  function buildBody(options, model, stream) {
     const body = {
       model,
       temperature: typeof options.temperature === 'number' ? options.temperature : 0.35,
-      max_tokens: options.maxTokens || 6000,
-      stream: false,
+      max_tokens: options.maxTokens || 4000,
+      stream: Boolean(stream),
       messages: [
         { role: 'system', content: options.system },
         { role: 'user', content: options.user }
       ]
     };
     if (options.jsonMode !== false) body.response_format = { type: 'json_object' };
+    return body;
+  }
+
+  async function statusError(res) {
+    let detail = '';
+    try { detail = (await res.text()).slice(0, 300); } catch (err) { detail = ''; }
+    try {
+      const j = JSON.parse(detail);
+      detail = (j.error && j.error.message) || j.message || detail;
+    } catch (err) { /* 保留原始文本 */ }
+    if (res.status === 401 || res.status === 403) return new Error(`API Key 无效或没有权限（${res.status}）：${detail}`);
+    if (res.status === 404) return new Error(`接口地址或模型名不对（404）：${detail}`);
+    if (res.status === 429) return new Error(`请求太频繁或额度用尽（429）：${detail}`);
+    return new Error(`模型服务返回 ${res.status}：${detail}`);
+  }
+
+  // 兼容字符串、数组分段（部分中转服务会返回 [{type:'text',text:'…'}]）
+  function normalizeContent(value) {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) {
+      return value.map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part.text === 'string') return part.text;
+        return '';
+      }).join('');
+    }
+    return '';
+  }
+
+  function emptyContentError(choice, reasoning) {
+    const finish = (choice && choice.finish_reason) || 'unknown';
+    if (reasoning) {
+      return taggedError(`模型把输出额度都用在了思考上（finish: ${finish}），没有给出计划正文。建议在设置里换用非思考型的对话模型。`, 'empty');
+    }
+    if (finish === 'length') {
+      return taggedError('模型输出被截断：计划太长，超出了本次生成上限。', 'empty');
+    }
+    return taggedError(`模型返回内容为空（finish: ${finish}）。`, 'empty');
+  }
+
+  function extractContent(text) {
+    let data;
+    try { data = JSON.parse(text); } catch (err) { throw new Error('模型返回的不是合法数据，可能被截断了。'); }
+    const choice = data && data.choices && data.choices[0];
+    const message = (choice && choice.message) || {};
+    const content = normalizeContent(message.content) || normalizeContent(choice && choice.text);
+    const reasoning = normalizeContent(message.reasoning_content || message.reasoning);
+    if (!content) {
+      if (choice && choice.finish_reason === 'length') {
+        throw new Error('模型输出被截断：计划太长，超出了本次生成上限。');
+      }
+      throw emptyContentError(choice, reasoning);
+    }
+    if (choice && choice.finish_reason === 'length') {
+      throw new Error('模型输出被截断：计划太长，超出了本次生成上限。');
+    }
+    return content;
+  }
+
+  // 流式请求：边生成边接收，避免长时间无数据被网络掐断
+  async function requestStream(options, ctx) {
+    const ctrl = new AbortController();
+    let totalTimer = setTimeout(() => ctrl.abort(), TOTAL_TIMEOUT);
+    let idleTimer = null;
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => ctrl.abort(), IDLE_TIMEOUT);
+    };
+    const cleanup = () => {
+      clearTimeout(totalTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      totalTimer = null;
+      idleTimer = null;
+    };
 
     let res;
     try {
-      res = await fetch(`${baseUrl}/chat/completions`, {
+      armIdle();
+      res = await fetch(`${ctx.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`
+          Authorization: `Bearer ${ctx.apiKey}`
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(buildBody(options, ctx.model, true)),
+        signal: ctrl.signal
+      });
+    } catch (err) {
+      cleanup();
+      if (err && err.name === 'AbortError') throw taggedError('连接超时：模型长时间没有响应。', 'timeout');
+      throw taggedError(NETWORK_HINT, 'network');
+    }
+
+    if (!res.ok) {
+      cleanup();
+      throw await statusError(res);
+    }
+
+    if (!res.body || typeof res.body.getReader !== 'function') {
+      let text = '';
+      try { text = await res.text(); } catch (err) { cleanup(); throw taggedError(NETWORK_HINT, 'network'); }
+      cleanup();
+      return extractContent(text);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let content = '';
+    let reasoning = '';
+    let finish = '';
+    let serverError = '';
+    let sawSSE = false;
+    let done = false;
+
+    try {
+      while (!done) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        armIdle();
+        buffer += decoder.decode(chunk.value, { stream: true });
+        if (!sawSSE && buffer.trim().charAt(0) === '{') {
+          // 服务端忽略了 stream 参数，直接返回完整 JSON
+          let rest = '';
+          try { rest = await res.text(); } catch (err) { rest = ''; }
+          buffer += rest;
+          break;
+        }
+        let index = buffer.indexOf('\n');
+        while (index >= 0 && !done) {
+          const line = buffer.slice(0, index).replace(/\r$/, '').trim();
+          buffer = buffer.slice(index + 1);
+          index = buffer.indexOf('\n');
+          if (!line || line.charAt(0) === ':') continue;
+          if (line.indexOf('data:') !== 0) continue;
+          sawSSE = true;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          if (payload === '[DONE]') { done = true; break; }
+          let obj;
+          try { obj = JSON.parse(payload); } catch (err) { continue; }
+          if (obj && obj.error) {
+            serverError = obj.error.message || '模型返回错误。';
+            done = true;
+            break;
+          }
+          const choice = obj && obj.choices && obj.choices[0];
+          if (!choice) continue;
+          if (choice.finish_reason) finish = choice.finish_reason;
+          const piece = normalizeContent(choice.delta && choice.delta.content);
+          if (piece) content += piece;
+          const think = normalizeContent(choice.delta && (choice.delta.reasoning_content || choice.delta.reasoning));
+          if (think) reasoning += think;
+        }
+      }
+    } catch (err) {
+      cleanup();
+      if (err && err.name === 'AbortError') throw taggedError('生成中断：模型超过 90 秒没有输出。', 'timeout');
+      throw taggedError(NETWORK_HINT, 'network');
+    }
+    cleanup();
+
+    if (serverError) throw new Error(serverError);
+    if (!sawSSE) {
+      // 整体 JSON
+      const trimmed = buffer.trim();
+      if (trimmed.charAt(0) === '{' || trimmed.charAt(0) === '[') return extractContent(trimmed);
+      throw taggedError('模型返回的格式无法识别。', 'empty');
+    }
+    if (!content) throw emptyContentError({ finish_reason: finish }, reasoning);
+    if (finish === 'length') {
+      throw taggedError('模型输出被截断：计划太长，超出了本次生成上限，正在改用分段生成。', 'empty');
+    }
+    return content;
+  }
+
+  async function requestPlain(options, ctx) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), TOTAL_TIMEOUT);
+    let res;
+    try {
+      res = await fetch(`${ctx.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${ctx.apiKey}`
+        },
+        body: JSON.stringify(buildBody(options, ctx.model, false)),
         signal: ctrl.signal
       });
     } catch (err) {
       clearTimeout(timer);
-      if (err && err.name === 'AbortError') throw new Error('请求超时（120 秒），模型没有响应，请稍后重试。');
-      throw new Error('无法连接模型服务，请检查网络、接口地址，或该服务是否允许浏览器直连（CORS）。');
+      if (err && err.name === 'AbortError') throw taggedError('请求超时，模型没有响应，请稍后重试。', 'timeout');
+      throw taggedError(NETWORK_HINT, 'network');
     }
     clearTimeout(timer);
+    if (!res.ok) throw await statusError(res);
 
-    const text = await res.text();
-    if (!res.ok) {
-      let detail = text.slice(0, 300);
+    let text = '';
+    try { text = await res.text(); } catch (err) { throw taggedError(NETWORK_HINT, 'network'); }
+    return extractContent(text);
+  }
+
+  // 先流式两次，仍失败则退回普通请求；只对网络类错误重试
+  async function chatRaw(options) {
+    const ctx = resolveEndpoint(options);
+    const plan = [true, true, false];
+    let lastError = null;
+    for (let i = 0; i < plan.length; i += 1) {
       try {
-        const j = JSON.parse(text);
-        detail = (j.error && j.error.message) || j.message || detail;
-      } catch (err) { /* 保留原始文本 */ }
-      if (res.status === 401 || res.status === 403) throw new Error(`API Key 无效或没有权限（${res.status}）：${detail}`);
-      if (res.status === 404) throw new Error(`接口地址或模型名不对（404）：${detail}`);
-      if (res.status === 429) throw new Error(`请求太频繁或额度用尽（429）：${detail}`);
-      throw new Error(`模型服务返回 ${res.status}：${detail}`);
+        return plan[i] ? await requestStream(options, ctx) : await requestPlain(options, ctx);
+      } catch (err) {
+        lastError = err;
+        if (!err || (err.kind !== 'network' && err.kind !== 'timeout')) throw err;
+        if (i < plan.length - 1) await sleep(1500);
+      }
     }
-
-    let data;
-    try { data = JSON.parse(text); } catch (err) { throw new Error('模型返回的不是合法数据，可能被截断了。'); }
-    const content = data && data.choices && data.choices[0] && data.choices[0].message
-      ? data.choices[0].message.content
-      : '';
-    if (!content) throw new Error('模型返回内容为空，请稍后重试。');
-    return content;
+    throw lastError;
   }
 
   function parseJSONLoose(text) {
@@ -280,8 +472,9 @@
 要求：
 - phases 覆盖整个计划区间，2-4 个阶段，日期连续不重叠。
 - sessions 覆盖每个训练日，不要排休息日；比赛日必须有一条 type=race。
-- 每条 session 的 deliverables 为 1-3 条，minutes 之和等于 session.minutes（允许 ±5 分钟）。
+- 每条 session 的 deliverables 为 1-2 条，minutes 之和等于 session.minutes（允许 ±5 分钟）。
 - 单次 minutes 不超过 ${input.maxMinutes}，distanceKm 与 minutes 匹配。
+- 输出尽量紧凑：不要多余空白、不要重复措辞；focus 与 note 可以为空字符串；summary 不超过 3 句。
 - 所有日期格式为 YYYY-MM-DD。只输出 JSON。`;
   }
 
@@ -444,7 +637,13 @@
       }
       if (!s.content) errors.push(`${label} 缺少训练内容。`);
       if (!Array.isArray(s.deliverables) || !s.deliverables.length) errors.push(`${label} 没有可勾选的交付物。`);
-      if (s.minutes > input.maxMinutes) errors.push(`${label} 安排了 ${s.minutes} 分钟，超过单次上限 ${input.maxMinutes} 分钟。`);
+      if (s.minutes > input.maxMinutes) {
+        if (s.date === raceDate || s.type === 'race') {
+          warnings.push(`${label} 比赛用时 ${s.minutes} 分钟，超过日常单次上限，属正常情况。`);
+        } else {
+          errors.push(`${label} 安排了 ${s.minutes} 分钟，超过单次上限 ${input.maxMinutes} 分钟。`);
+        }
+      }
       if (seen[s.date]) errors.push(`${label} 出现了两次。`);
       seen[s.date] = true;
     });
@@ -466,6 +665,8 @@
       w.label = `${monthDay(key)} – ${monthDay(w.end)}`;
       w.volume = Math.round(w.volume * 10) / 10;
       w.hasRace = w.sessions.some((s) => s.date === raceDate);
+      const raceSession = w.sessions.find((s) => s.date === raceDate);
+      w.volumeNoRace = Math.round((w.volume - (raceSession ? effectiveKm(raceSession) : 0)) * 10) / 10;
       return w;
     });
 
@@ -477,8 +678,9 @@
       if (w.sessions.length >= 7) errors.push(`${w.label} 七天都在训练，至少需要留 1 天休息。`);
     });
 
-    // 跑量增幅
+    // 跑量增幅（比赛周含比赛距离，单独判断，不参与增幅比较）
     for (let i = 1; i < weeks.length; i += 1) {
+      if (weeks[i].hasRace) continue;
       const prev = weeks[i - 1].volume;
       const cur = weeks[i].volume;
       if (!prev || !cur) continue;
@@ -490,20 +692,21 @@
       }
     }
 
-    // 减量：比较峰值周与最后两周
-    if (weeks.length >= 4) {
-      const peak = weeks.reduce((max, w) => Math.max(max, w.volume), 0);
+    // 减量：比赛周只看除比赛外的训练量
+    if (weeks.length >= 3) {
+      const trainingWeeks = weeks.slice(0, weeks.length - 1);
+      const peak = trainingWeeks.reduce((max, w) => Math.max(max, w.volume), 0);
       const last = weeks[weeks.length - 1];
       const prev = weeks[weeks.length - 2];
       if (peak > 0) {
-        if (last.volume > peak * 0.85) {
-          errors.push(`比赛周（${last.label}）跑量 ${last.volume}km，仍接近峰值周 ${peak}km，需要明显减量。`);
-        } else if (last.volume > peak * 0.75) {
-          warnings.push(`比赛周跑量约为峰值周的 ${Math.round((last.volume / peak) * 100)}%，可以再轻一点。`);
+        if (last.volumeNoRace > peak * 0.7) {
+          errors.push(`比赛周（${last.label}）除比赛外还安排了 ${last.volumeNoRace}km，赛前应只留少量轻松跑。`);
+        } else if (last.volumeNoRace > peak * 0.55) {
+          warnings.push(`比赛周除比赛外还有 ${last.volumeNoRace}km 训练，可以再轻一点。`);
         }
-        if (prev.volume > peak) warnings.push(`赛前一周（${prev.label}）没有减量，建议低于峰值周。`);
-        if (weeks.length >= 6 && last.volume > prev.volume * 1.05) {
-          errors.push(`比赛周跑量高于前一周，赛前没有减量。`);
+        if (prev.volume > peak) warnings.push(`赛前一周（${prev.label}）没有减量，建议低于峰值周 ${peak}km。`);
+        if (weeks.length >= 5 && last.volumeNoRace > prev.volume * 0.8) {
+          warnings.push(`比赛周的训练量和前一周接近，赛前减量不明显。`);
         }
       }
     }
@@ -539,15 +742,227 @@
     };
   }
 
-  async function generatePlan(input) {
-    const raw = await chatJSON({
-      system: SYSTEM_COACH,
-      user: buildUserPrompt(input),
-      maxTokens: 6000,
-      temperature: 0.35
+  /* ---------------- 分段生成：单次生成失败时自动启用 ---------------- */
+
+  const SYSTEM_COACH_CHUNK = `你是严谨的耐力跑步教练，正在为业余跑者分段制定半程马拉松训练计划。
+只依据给出的信息安排，不虚构伤病或器械；只输出一个 JSON 对象，不要 Markdown，不要解释。`;
+
+  function eachDate(start, end, limit) {
+    const list = [];
+    let cursor = start;
+    const cap = limit || 10;
+    while (cursor <= end && list.length < cap) {
+      list.push(cursor);
+      cursor = addDays(cursor, 1);
+    }
+    return list;
+  }
+
+  function mondayOf(dateStr) {
+    const d = parseDate(dateStr);
+    if (!d) return dateStr;
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return fmtDate(d);
+  }
+
+  function parseTimeToMinutes(value) {
+    const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(String(value || '').trim());
+    if (!m) return 0;
+    if (m[3] !== undefined) return Number(m[1]) * 60 + Number(m[2]);
+    const first = Number(m[1]);
+    const second = Number(m[2]);
+    return first <= 5 ? first * 60 + second : first;
+  }
+
+  // 由程序自己算每周目标跑量，模型只负责填当周的课，避免跑量忽高忽低
+  function buildWeekPlan(input) {
+    const weeks = [];
+    let cursor = mondayOf(input.today);
+    while (cursor <= input.raceDate && weeks.length < 40) {
+      weeks.push(cursor);
+      cursor = addDays(cursor, 7);
+    }
+    const n = weeks.length;
+    const dayCount = Math.max(2, Math.min(input.days.length, 6));
+    const perSessionKm = Math.max(3, input.maxMinutes / 6);
+    const weeklyCap = Math.max(14, Math.round(perSessionKm * dayCount * 0.9));
+    const peakIndex = Math.max(0, n - 3);
+    const base = Math.max(10, Math.min(18, weeklyCap));
+    const peakVolume = Math.round(Math.min(base * Math.pow(1.06, peakIndex), weeklyCap));
+
+    return weeks.map((start, i) => {
+      const end = addDays(start, 6);
+      const dates = eachDate(start, end).filter((d) => {
+        if (d < input.today || d > input.raceDate) return false;
+        return input.days.indexOf(weekday(d)) >= 0 || d === input.raceDate;
+      });
+      let volume;
+      if (i === n - 1) volume = Math.round(21.1 + (dates.length > 1 ? 5 : 0));
+      else if (i > peakIndex) volume = Math.max(8, Math.round(peakVolume * 0.62));
+      else volume = Math.round(Math.min(base * Math.pow(1.06, i), weeklyCap));
+      return {
+        start,
+        end,
+        dates,
+        volume,
+        hasRace: dates.indexOf(input.raceDate) >= 0
+      };
     });
-    const plan = normalizePlan(raw, input);
-    return { plan, validation: validatePlan(plan, input) };
+  }
+
+  function buildChunkPrompt(input, batch, index, total) {
+    const weekLines = batch.map((w, i) => {
+      const dateText = w.dates.map((d) => `${d}(周${WEEKDAY_SHORT[weekday(d)]})`).join('、');
+      const raceHint = w.dates.indexOf(input.raceDate) >= 0 ? `，其中 ${input.raceDate} 是比赛日（必须安排 type=race）` : '';
+      return `第 ${i + 1} 周（${w.start} 至 ${w.end}）目标跑量约 ${w.volume} km；可训练日：${dateText || '无'}${raceHint}`;
+    }).join('\n');
+
+    const raceWeek = batch.some((w) => w.dates.indexOf(input.raceDate) >= 0);
+    const raceRule = raceWeek
+      ? `6. 比赛周：除比赛日外，最多再安排 1 次 20–30 分钟轻松跑；不要在赛前两天安排训练。\n`
+      : '';
+
+    return `【整体目标】${input.goal}，${input.raceDate} 比赛，目标成绩 ${input.target}，当前最好成绩 ${input.current || '未提供'}
+【训练限制】每周可训练：${input.days.slice().sort((a, b) => a - b).map((d) => `周${WEEKDAY_SHORT[d]}`).join('、')}；单次最长 ${input.maxMinutes} 分钟；场地器械：${input.equipment || '未提供'}；伤病限制：${input.notes || '无'}
+【本次负责】整份计划的第 ${index}/${total} 段
+
+${weekLines}
+
+要求：
+1. 只在上面的可训练日安排训练，每个可训练日 1 次，休息日不排课。
+2. 单次时长不超过 ${input.maxMinutes} 分钟；按 6 分钟/公里估算，距离与时长保持一致。
+3. 每周总跑量尽量接近目标（上下浮动不超过 15%），长距离课安排在周末。
+4. 高强度课（interval、tempo、race）不要连续两天。
+5. 比赛日安排 type=race，content 用「比赛日 · 半马」，deliverables 写目标配速与赛后恢复。
+${raceRule}
+只输出 JSON：
+{"summary":"一句话说明本段重点","sessions":[{"date":"YYYY-MM-DD","type":"easy|long|tempo|interval|strength|cross|race","content":"不超过18字","minutes":50,"distanceKm":8,"deliverables":[{"title":"轻松跑 8km","minutes":40},{"title":"拉伸放松","minutes":10}]}]}`;
+  }
+
+  function buildPhases(weekPlan, input) {
+    const n = weekPlan.length;
+    if (n <= 2) {
+      return [{ name: '备战期', start: input.today, end: input.raceDate, focus: '保持节奏，熟悉比赛配速' }];
+    }
+    const cut1 = Math.max(1, Math.round(n * 0.4));
+    const cut2 = Math.max(cut1 + 1, n - 2);
+    const blocks = [
+      { name: '第一阶段 · 基础', from: 0, to: cut1 - 1, focus: '建立跑量，打有氧底子' },
+      { name: '第二阶段 · 强化', from: cut1, to: cut2 - 1, focus: '加入节奏与长距离，接近目标配速' },
+      { name: '第三阶段 · 减量', from: cut2, to: n - 1, focus: '减量恢复，比赛日全力发挥' }
+    ];
+    return blocks.filter((b) => b.from <= b.to).map((b) => ({
+      name: b.name,
+      start: b.from === 0 ? input.today : weekPlan[b.from].start,
+      end: b.to === n - 1 ? input.raceDate : weekPlan[b.to].end,
+      focus: b.focus
+    }));
+  }
+
+  function defaultRaceSession(input) {
+    const targetMinutes = parseTimeToMinutes(input.target);
+    const minutes = Math.max(60, Math.min(input.maxMinutes, targetMinutes > 45 ? targetMinutes : 110));
+    const runPart = Math.max(20, minutes - 10);
+    return {
+      date: input.raceDate,
+      type: 'race',
+      content: '比赛日 · 半马',
+      minutes,
+      distanceKm: 21.1,
+      note: '按目标配速执行，前程保守',
+      deliverables: normalizeDeliverables([
+        { title: '按目标配速完成比赛', minutes: runPart },
+        { title: '赛后拉伸与补给', minutes: Math.max(5, minutes - runPart) }
+      ], minutes)
+    };
+  }
+
+  async function generatePlanChunked(input, notify) {
+    const weekPlan = buildWeekPlan(input);
+    if (!weekPlan.length) throw new Error('比赛日期太近，无法排出训练周。');
+    const batchSize = 3;
+    const batches = [];
+    for (let i = 0; i < weekPlan.length; i += batchSize) batches.push(weekPlan.slice(i, i + batchSize));
+
+    const byDate = {};
+    let summary = '';
+
+    for (let b = 0; b < batches.length; b += 1) {
+      notify({ stage: 'chunk', index: b + 1, total: batches.length });
+      const prompt = buildChunkPrompt(input, batches[b], b + 1, batches.length);
+      let raw = null;
+      let lastError = null;
+      for (let attempt = 0; attempt < 2 && !raw; attempt += 1) {
+        try {
+          raw = await chatJSON({
+            system: SYSTEM_COACH_CHUNK,
+            user: prompt,
+            maxTokens: 2600,
+            temperature: 0.3
+          });
+        } catch (err) {
+          lastError = err;
+          if (!err || (err.kind !== 'empty' && err.kind !== 'network' && err.kind !== 'timeout')) throw err;
+        }
+      }
+      if (!raw) {
+        const detail = String((lastError && lastError.message) || '模型没有返回内容').replace(/[。.\s]+$/, '');
+        throw new Error(`第 ${b + 1}/${batches.length} 段生成失败：${detail}。可以稍后重试。`);
+      }
+      if (!summary) summary = String(raw.summary || '').trim();
+      const list = Array.isArray(raw.sessions) ? raw.sessions : [];
+      list.forEach((s) => {
+        if (!s || typeof s !== 'object') return;
+        const date = normalizeDate(s.date);
+        if (!date || byDate[date]) return;
+        if (date < input.today || date > input.raceDate) return;
+        byDate[date] = s;
+      });
+    }
+
+    const sessions = Object.keys(byDate).sort().map((k) => byDate[k]);
+    if (!sessions.some((s) => normalizeDate(s.date) === input.raceDate)) {
+      sessions.push(defaultRaceSession(input));
+    }
+
+    const raw = {
+      summary: summary || `共 ${weekPlan.length} 周，按基础、强化、减量三段推进，赛前两周减量。`,
+      program: { name: input.programName, subtitle: `目标 ${input.target}`, color: '#6F8F6A' },
+      phases: buildPhases(weekPlan, input),
+      sessions
+    };
+    return normalizePlan(raw, input);
+  }
+
+  async function generatePlan(input, onStage) {
+    const notify = typeof onStage === 'function' ? onStage : function () {};
+    let singleError = null;
+    try {
+      notify({ stage: 'single' });
+      const raw = await chatJSON({
+        system: SYSTEM_COACH,
+        user: buildUserPrompt(input),
+        maxTokens: 6000,
+        temperature: 0.35
+      });
+      const plan = normalizePlan(raw, input);
+      return { plan, validation: validatePlan(plan, input), mode: 'single' };
+    } catch (err) {
+      singleError = err;
+      const recoverable = err && (
+        err.kind === 'empty' || err.kind === 'network' || err.kind === 'timeout'
+        || /截断|为空|没有返回可用的训练安排/.test(String(err.message || ''))
+      );
+      if (!recoverable) throw err;
+    }
+
+    let plan;
+    try {
+      plan = await generatePlanChunked(input, notify);
+    } catch (err) {
+      throw new Error(`${(err && err.message) || '分段生成失败'}（单次生成也失败：${(singleError && singleError.message) || '未知原因'}）`);
+    }
+    return { plan, validation: validatePlan(plan, input), mode: 'chunked' };
   }
 
   function minutesToUnits(minutes) {

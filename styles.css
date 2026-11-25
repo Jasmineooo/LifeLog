@@ -1581,6 +1581,7 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
 .ai-modal { width: min(760px, 100%); }
 .ai-loading { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 9px; padding: 34px 16px 30px; }
 .ai-loading b { font-size: 14px; font-weight: 600; }
+.ai-loading .ai-stage { font-size: 10px; color: var(--brown); padding: 3px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); }
 .ai-loading p { margin: 0; max-width: 380px; color: var(--faint); font-size: 10px; line-height: 1.7; }
 .ai-spinner {
   width: 30px;
