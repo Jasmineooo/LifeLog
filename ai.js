@@ -8,7 +8,7 @@
   'use strict';
 
   const SETTINGS_KEY = 'ai.settings.v1';
-  const AI_VERSION = 'v4';
+  const AI_VERSION = 'v5';
   const DEFAULT_SETTINGS = { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' };
   const MODEL_PRESETS = [
     { id: 'deepseek-flash', name: 'DeepSeek Flash（快、便宜）', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' },
@@ -391,20 +391,34 @@
   }
 
   async function chatJSON(options) {
-    const withJsonMode = Object.assign({}, options, { jsonMode: true });
-    const withoutJsonMode = Object.assign({}, options, { jsonMode: false });
-    try {
-      const content = await chatRaw(withJsonMode);
-      return parseJSONLoose(content);
-    } catch (err) {
-      // 有些中转服务不支持 response_format: json_object，会直接返回空正文；
-      // 这类错误以及纯 JSON 格式问题，都再试一次不带 json_object 的请求。
-      const retryable = (err && err.kind === 'empty')
-        || /json_object|JSON 格式|没有按要求返回 JSON/.test(String(err && err.message));
-      if (!retryable) throw err;
-      const content = await chatRaw(withoutJsonMode);
-      return parseJSONLoose(content);
+    // 依次尝试：标准 → 去掉 json_object → 再加大额度并强化"少思考"提示
+    const base = options.maxTokens || 4000;
+    const attempts = [
+      { jsonMode: true, maxTokens: base, hint: '' },
+      { jsonMode: false, maxTokens: Math.max(base, 8000), hint: '' },
+      { jsonMode: false, maxTokens: Math.max(base, 16000), hint: '直接输出结果，不要输出任何思考、分析或解释过程。' }
+    ];
+    let lastError = null;
+    for (let i = 0; i < attempts.length; i += 1) {
+      const attempt = attempts[i];
+      try {
+        const content = await chatRaw({
+          settings: options.settings,
+          system: attempt.hint ? `${options.system}\n${attempt.hint}` : options.system,
+          user: options.user,
+          temperature: options.temperature,
+          maxTokens: attempt.maxTokens,
+          jsonMode: attempt.jsonMode
+        });
+        return parseJSONLoose(content);
+      } catch (err) {
+        lastError = err;
+        const retryable = (err && err.kind === 'empty')
+          || /json_object|JSON 格式|没有按要求返回 JSON|max_tokens/i.test(String(err && err.message));
+        if (!retryable) throw err;
+      }
     }
+    throw lastError;
   }
 
   async function testConnection(override) {
@@ -779,6 +793,28 @@
     return first <= 5 ? first * 60 + second : first;
   }
 
+  // 把一周的目标跑量分配到具体日期，长距离放在周末
+  function buildSlots(dates, volume, input, hasRace) {
+    const perCap = Math.max(3, Math.floor((input.maxMinutes / 6) * 2) / 2);
+    const raceMinutes = Math.max(45, Math.min(input.maxMinutes, parseTimeToMinutes(input.target) || 110));
+    if (hasRace) {
+      return dates.map((d) => (d === input.raceDate
+        ? { date: d, km: 21.1, minutes: raceMinutes, race: true }
+        : { date: d, km: 4, minutes: 25 }));
+    }
+    let weights;
+    if (dates.length >= 4) weights = [0.18, 0.22, 0.22, 0.38];
+    else if (dates.length === 3) weights = [0.22, 0.28, 0.5];
+    else if (dates.length === 2) weights = [0.4, 0.6];
+    else weights = dates.map(() => 1);
+    const totalWeight = weights.reduce((a, b) => a + b, 0) || 1;
+    return dates.map((d, i) => {
+      const share = (weights[i] || 1) / totalWeight;
+      const km = Math.max(3, Math.min(perCap, Math.round(volume * share * 2) / 2));
+      return { date: d, km, minutes: Math.max(15, Math.round((km * 6) / 5) * 5) };
+    });
+  }
+
   // 由程序自己算每周目标跑量，模型只负责填当周的课，避免跑量忽高忽低
   function buildWeekPlan(input) {
     const weeks = [];
@@ -805,43 +841,44 @@
       if (i === n - 1) volume = Math.round(21.1 + (dates.length > 1 ? 5 : 0));
       else if (i > peakIndex) volume = Math.max(8, Math.round(peakVolume * 0.62));
       else volume = Math.round(Math.min(base * Math.pow(1.06, i), weeklyCap));
+      const hasRace = dates.indexOf(input.raceDate) >= 0;
       return {
         start,
         end,
         dates,
         volume,
-        hasRace: dates.indexOf(input.raceDate) >= 0
+        hasRace,
+        slots: buildSlots(dates, volume, input, hasRace)
       };
     });
   }
 
   function buildChunkPrompt(input, batch, index, total) {
     const weekLines = batch.map((w, i) => {
-      const dateText = w.dates.map((d) => `${d}(周${WEEKDAY_SHORT[weekday(d)]})`).join('、');
-      const raceHint = w.dates.indexOf(input.raceDate) >= 0 ? `，其中 ${input.raceDate} 是比赛日（必须安排 type=race）` : '';
-      return `第 ${i + 1} 周（${w.start} 至 ${w.end}）目标跑量约 ${w.volume} km；可训练日：${dateText || '无'}${raceHint}`;
-    }).join('\n');
+      const slotLines = w.slots.map((s) => {
+        const tag = s.race ? '（比赛日）' : '';
+        return `  ${s.date}（周${WEEKDAY_SHORT[weekday(s.date)]}）${s.km}km / ${s.minutes}分钟${tag}`;
+      }).join('\n');
+      const weekTag = w.hasRace ? ' · 比赛周' : (w.volume < 20 ? ' · 减量周' : '');
+      return `第 ${i + 1} 周（${w.start} 至 ${w.end}，共 ${w.volume}km${weekTag}）\n${slotLines}`;
+    }).join('\n\n');
 
-    const raceWeek = batch.some((w) => w.dates.indexOf(input.raceDate) >= 0);
-    const raceRule = raceWeek
-      ? `6. 比赛周：除比赛日外，最多再安排 1 次 20–30 分钟轻松跑；不要在赛前两天安排训练。\n`
-      : '';
+    return `你是跑步教练。下面这份课表的日期、距离、时长已经排好，你只需为每一行补上「训练内容」「训练类型」与「交付物」，不要改动日期、距离和时长。
 
-    return `【整体目标】${input.goal}，${input.raceDate} 比赛，目标成绩 ${input.target}，当前最好成绩 ${input.current || '未提供'}
-【训练限制】每周可训练：${input.days.slice().sort((a, b) => a - b).map((d) => `周${WEEKDAY_SHORT[d]}`).join('、')}；单次最长 ${input.maxMinutes} 分钟；场地器械：${input.equipment || '未提供'}；伤病限制：${input.notes || '无'}
-【本次负责】整份计划的第 ${index}/${total} 段
+【跑者】目标 ${input.goal}，${input.raceDate} 比赛，目标成绩 ${input.target}，当前最好 ${input.current || '未提供'}
+【限制】单次最长 ${input.maxMinutes} 分钟；场地 ${input.equipment || '未提供'}；伤病 ${input.notes || '无'}
+【本次负责】第 ${index}/${total} 段
 
 ${weekLines}
 
-要求：
-1. 只在上面的可训练日安排训练，每个可训练日 1 次，休息日不排课。
-2. 单次时长不超过 ${input.maxMinutes} 分钟；按 6 分钟/公里估算，距离与时长保持一致。
-3. 每周总跑量尽量接近目标（上下浮动不超过 15%），长距离课安排在周末。
-4. 高强度课（interval、tempo、race）不要连续两天。
-5. 比赛日安排 type=race，content 用「比赛日 · 半马」，deliverables 写目标配速与赛后恢复。
-${raceRule}
-只输出 JSON：
-{"summary":"一句话说明本段重点","sessions":[{"date":"YYYY-MM-DD","type":"easy|long|tempo|interval|strength|cross|race","content":"不超过18字","minutes":50,"distanceKm":8,"deliverables":[{"title":"轻松跑 8km","minutes":40},{"title":"拉伸放松","minutes":10}]}]}`;
+每行的填写要求：
+- content：不超过 18 个汉字的训练名称，例如「轻松跑 6km」「节奏跑 3×1km」「长距离 14km」「核心与拉伸」。
+- type：从 easy、long、tempo、interval、strength、cross、race 中选一个；10km 以上的长距离用 long，比赛日用 race。
+- deliverables：1-2 条可以打勾的完成项，每条给分钟数，合计等于该行的分钟数。
+- 不要输出思考过程，不要解释，直接给结果。
+
+只输出 JSON（sessions 的 date 必须与上面每一行一致）：
+{"summary":"一句话说明本段重点","sessions":[{"date":"YYYY-MM-DD","type":"easy","content":"不超过18字","deliverables":[{"title":"完成 6km","minutes":30},{"title":"拉伸放松","minutes":10}]}]}`;
   }
 
   function buildPhases(weekPlan, input) {
@@ -885,11 +922,12 @@ ${raceRule}
   async function generatePlanChunked(input, notify) {
     const weekPlan = buildWeekPlan(input);
     if (!weekPlan.length) throw new Error('比赛日期太近，无法排出训练周。');
-    const batchSize = 3;
+    const batchSize = 2;
     const batches = [];
     for (let i = 0; i < weekPlan.length; i += batchSize) batches.push(weekPlan.slice(i, i + batchSize));
 
-    const byDate = {};
+    const textByDate = {};
+    const failedChunks = [];
     let summary = '';
 
     for (let b = 0; b < batches.length; b += 1) {
@@ -902,7 +940,7 @@ ${raceRule}
           raw = await chatJSON({
             system: SYSTEM_COACH_CHUNK,
             user: prompt,
-            maxTokens: 2600,
+            maxTokens: 3000,
             temperature: 0.3
           });
         } catch (err) {
@@ -911,23 +949,49 @@ ${raceRule}
         }
       }
       if (!raw) {
-        const detail = String((lastError && lastError.message) || '模型没有返回内容').replace(/[。.\s]+$/, '');
-        throw new Error(`第 ${b + 1}/${batches.length} 段生成失败：${detail}。可以稍后重试。`);
+        // 该段没有拿到文字，但日期与跑量骨架已经排好，先用默认名称填充，不中断整份计划
+        failedChunks.push(b + 1);
+        continue;
       }
       if (!summary) summary = String(raw.summary || '').trim();
       const list = Array.isArray(raw.sessions) ? raw.sessions : [];
       list.forEach((s) => {
         if (!s || typeof s !== 'object') return;
         const date = normalizeDate(s.date);
-        if (!date || byDate[date]) return;
-        if (date < input.today || date > input.raceDate) return;
-        byDate[date] = s;
+        if (!date) return;
+        textByDate[date] = s;
       });
     }
 
-    const sessions = Object.keys(byDate).sort().map((k) => byDate[k]);
-    if (!sessions.some((s) => normalizeDate(s.date) === input.raceDate)) {
-      sessions.push(defaultRaceSession(input));
+    // 结构以程序排好的骨架为准，模型只补充文字
+    const sessions = [];
+    weekPlan.forEach((week) => {
+      week.slots.forEach((slot) => {
+        const filled = textByDate[slot.date] || {};
+        const fallbackRace = slot.race ? defaultRaceSession(input) : null;
+        const content = String(filled.content || '').trim().slice(0, 30)
+          || (fallbackRace ? fallbackRace.content : slot.km >= 10 ? `长距离 ${slot.km}km` : `轻松跑 ${slot.km}km`);
+        let type = normalizeType(filled.type);
+        if (slot.race) type = 'race';
+        else if (type === 'race') type = 'easy';
+        else if (slot.km >= 12 && type === 'easy') type = 'long';
+        const deliverables = Array.isArray(filled.deliverables) && filled.deliverables.length
+          ? filled.deliverables
+          : fallbackRace ? fallbackRace.deliverables : [{ title: `完成 ${slot.km}km`, minutes: Math.max(5, slot.minutes - 10) }, { title: '拉伸与记录体感', minutes: 10 }];
+        sessions.push({
+          date: slot.date,
+          type,
+          content,
+          minutes: slot.minutes,
+          distanceKm: slot.km,
+          note: '',
+          deliverables
+        });
+      });
+    });
+
+    if (failedChunks.length === batches.length) {
+      throw new Error('模型一直没有返回可用内容。可以稍后重试，或在设置里换用非思考型的对话模型。');
     }
 
     const raw = {
@@ -936,7 +1000,7 @@ ${raceRule}
       phases: buildPhases(weekPlan, input),
       sessions
     };
-    return normalizePlan(raw, input);
+    return { plan: normalizePlan(raw, input), failedChunks };
   }
 
   async function generatePlan(input, onStage) {
@@ -961,13 +1025,18 @@ ${raceRule}
       if (!recoverable) throw err;
     }
 
-    let plan;
+    let chunked;
     try {
-      plan = await generatePlanChunked(input, notify);
+      chunked = await generatePlanChunked(input, notify);
     } catch (err) {
       throw new Error(`${(err && err.message) || '分段生成失败'}（单次生成也失败：${(singleError && singleError.message) || '未知原因'}）`);
     }
-    return { plan, validation: validatePlan(plan, input), mode: 'chunked' };
+    return {
+      plan: chunked.plan,
+      validation: validatePlan(chunked.plan, input),
+      mode: 'chunked',
+      failedChunks: chunked.failedChunks
+    };
   }
 
   function minutesToUnits(minutes) {

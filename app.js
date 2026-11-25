@@ -796,7 +796,7 @@
         <button class="btn btn-primary btn-sm" data-action="open-ai-plan">${icon('spark')} 生成训练计划</button>
       </div>
       ${planRows ? `<div class="ai-plan-list"><span class="ai-plan-list-title">最近的 AI 计划</span>${planRows}</div>` : ''}
-      <p class="field-hint" style="margin-top:10px">训练计划由大模型生成，可能不完全适合你。写入前请检查日期与强度，身体不适时以医生和教练意见为准。<span class="ai-ver">AI 模块 ${esc(api && api.VERSION ? api.VERSION : '—')}</span></p>
+      <p class="field-hint" style="margin-top:10px">训练计划由大模型生成，可能不完全适合你。写入前请检查日期与强度。如果提示「额度都用在思考上」，请把模型换成非思考型（例如 deepseek-chat）。<span class="ai-ver">AI 模块 ${esc(api && api.VERSION ? api.VERSION : '—')}</span></p>
     </section>`;
   }
 
@@ -1080,9 +1080,19 @@
     };
     api.generatePlan(input, onStage).then((result) => {
       if (!document.getElementById('ai-plan-modal')) return;
-      aiDraft = { input, plan: result.plan, validation: result.validation, mode: result.mode };
+      aiDraft = {
+        input,
+        plan: result.plan,
+        validation: result.validation,
+        mode: result.mode,
+        failedChunks: result.failedChunks || []
+      };
       renderAIPlanPreview();
-      if (result.mode === 'chunked') showToast('整份生成未成功，已改用分段生成完成。', 'info');
+      if (result.mode === 'chunked' && !aiDraft.failedChunks.length) {
+        showToast('整份生成未成功，已改用分段生成完成。', 'info');
+      } else if (aiDraft.failedChunks.length) {
+        showToast('有部分段落没拿到 AI 文字，已用默认训练名填充，可直接修改。', 'alert');
+      }
     }).catch((err) => {
       if (!document.getElementById('ai-plan-modal')) return;
       aiDraft = null;
@@ -1150,7 +1160,7 @@
         <div class="ai-phase-list">
           ${plan.phases.map((p) => `<span class="ai-phase"><b>${esc(p.name)}</b><span>${fmtShort(p.start)} – ${fmtShort(p.end)}</span></span>`).join('')}
         </div>
-        <div class="ai-validation" id="ai-validation">${aiValidationHTML(validation)}</div>
+        <div class="ai-validation" id="ai-validation">${(aiDraft.failedChunks || []).length ? `<div class="ai-check warn">${icon('alert')}<div><b>有 ${aiDraft.failedChunks.length} 段没拿到 AI 文字</b><span>日期与跑量已按目标排好，训练名称用默认值，可直接在下面改。</span></div></div>` : ''}${aiValidationHTML(validation)}</div>
         <div class="ai-weeks">${weekHTML}</div>
       </div>
       <div class="modal-foot">
