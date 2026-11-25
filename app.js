@@ -15,6 +15,9 @@
     modal: null
   };
 
+  // AI 训练计划：草稿只在内存里，用户确认后才写入 lifelog.v1
+  let aiDraft = null;
+
   const main = document.getElementById('app-main');
   const modalRoot = document.getElementById('modal-root');
   const toastRoot = document.getElementById('toast-root');
@@ -691,6 +694,8 @@
         </div>
 
         <div class="settings-col">
+          ${renderAICard()}
+
           <section class="settings-card card">
             <div class="settings-card-head">
               <div><h2>数据与备份</h2><p>本地优先，随时带走</p></div>
@@ -737,6 +742,539 @@
         </div>
       </div>
     </section>`;
+  }
+
+  /* ---------------- AI 教练 ---------------- */
+
+  function aiApi() { return window.LifeLogAI; }
+
+  function aiSettings() {
+    const api = aiApi();
+    return api ? api.loadSettings() : { baseUrl: '', model: '', apiKey: '' };
+  }
+
+  function renderAICard() {
+    const api = aiApi();
+    const settings = aiSettings();
+    const configured = Boolean(settings.apiKey);
+    const plans = (state.meta && Array.isArray(state.meta.aiPlans)) ? state.meta.aiPlans.slice(0, 3) : [];
+    const modelOptions = (api ? api.MODEL_PRESETS : []).map((m) => `<option value="${attr(m.model)}">${esc(m.name)}</option>`).join('');
+    const planRows = plans.map((p) => `<div class="ai-plan-row">
+      <div><b>${esc(p.programName || 'AI 训练计划')}</b><span>${esc(formatBackupTime(p.at))} · ${Number(p.sessionCount) || 0} 次训练</span></div>
+      <button class="text-btn" data-action="ai-undo" data-ai-plan="${attr(p.id)}">撤销</button>
+    </div>`).join('');
+
+    return `<section class="settings-card card ai-card">
+      <div class="settings-card-head">
+        <div><h2>AI 教练</h2><p>DeepSeek 排训练计划，确认后才写进日历</p></div>
+        <span class="icon-wrap">${icon('spark')}</span>
+      </div>
+      <div class="ai-status ${configured ? 'ok' : ''}">
+        <i></i>
+        <div><b>${configured ? '已配置' : '还没有 API Key'}</b><span>${configured ? `${esc(settings.model)} · ${esc(settings.baseUrl)}` : '填写 DeepSeek Key 后即可生成训练计划'}</span></div>
+      </div>
+      <div class="form-grid">
+        <label class="field"><span class="field-label">接口地址</span>
+          <input class="input" id="ai-base-url" value="${attr(settings.baseUrl)}" placeholder="https://api.deepseek.com">
+        </label>
+        <label class="field"><span class="field-label">模型</span>
+          <input class="input" id="ai-model" list="ai-model-list" value="${attr(settings.model)}" placeholder="deepseek-flash">
+          <datalist id="ai-model-list">${modelOptions}</datalist>
+        </label>
+      </div>
+      <label class="field field-block"><span class="field-label">API Key <small>只存在本机，备份时自动剔除</small></span>
+        <input class="input" id="ai-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="${configured ? '已保存，留空则不修改' : 'sk-...'}">
+      </label>
+      <div class="ai-actions">
+        <button class="btn btn-soft btn-sm" data-action="ai-save">${icon('check')} 保存设置</button>
+        <button class="btn btn-ghost btn-sm" data-action="ai-test">${icon('activity')} 测试连接</button>
+        ${configured ? `<button class="text-btn" data-action="ai-clear-key">清除 Key</button>` : ''}
+        <span class="ai-test-result" id="ai-test-result"></span>
+      </div>
+      <div class="ai-plan-entry">
+        <div><b>从目标到日程</b><span>填写比赛日期、目标成绩和可训练时间，AI 排出每次训练，你确认后再写入。</span></div>
+        <button class="btn btn-primary btn-sm" data-action="open-ai-plan">${icon('spark')} 生成训练计划</button>
+      </div>
+      ${planRows ? `<div class="ai-plan-list"><span class="ai-plan-list-title">最近的 AI 计划</span>${planRows}</div>` : ''}
+      <p class="field-hint" style="margin-top:10px">训练计划由大模型生成，可能不完全适合你。写入前请检查日期与强度，身体不适时以医生和教练意见为准。</p>
+    </section>`;
+  }
+
+  function saveAISettings() {
+    const api = aiApi();
+    if (!api) return;
+    const baseUrl = document.getElementById('ai-base-url').value.trim();
+    const model = document.getElementById('ai-model').value.trim();
+    const keyInput = document.getElementById('ai-api-key').value.trim();
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      showToast('接口地址需要以 http:// 或 https:// 开头。', 'alert');
+      return;
+    }
+    if (!model) {
+      showToast('请填写模型名。', 'alert');
+      return;
+    }
+    const current = api.loadSettings();
+    const saved = api.saveSettings({ baseUrl, model, apiKey: keyInput || current.apiKey });
+    if (!saved) {
+      showToast('设置保存失败，可能是浏览器存储被禁用。', 'alert');
+      return;
+    }
+    render();
+    showToast('AI 设置已保存。');
+  }
+
+  function clearAIKey() {
+    const api = aiApi();
+    if (!api) return;
+    if (!window.confirm('清除本机保存的 API Key？已经生成的计划不受影响。')) return;
+    const current = api.loadSettings();
+    api.saveSettings({ baseUrl: current.baseUrl, model: current.model, apiKey: '' });
+    render();
+    showToast('API Key 已清除。', 'info');
+  }
+
+  async function testAIConnection() {
+    const api = aiApi();
+    const result = document.getElementById('ai-test-result');
+    if (!api || !result) return;
+    const current = api.loadSettings();
+    const baseUrl = document.getElementById('ai-base-url').value.trim();
+    const model = document.getElementById('ai-model').value.trim();
+    const key = document.getElementById('ai-api-key').value.trim() || current.apiKey;
+    if (!key) {
+      result.textContent = '请先填写 API Key';
+      result.className = 'ai-test-result err';
+      document.getElementById('ai-api-key').focus();
+      return;
+    }
+    result.textContent = '测试中…';
+    result.className = 'ai-test-result';
+    try {
+      const text = await api.testConnection({ baseUrl, model, apiKey: key });
+      result.textContent = `连接正常：${text || '可用'}`;
+      result.className = 'ai-test-result ok';
+    } catch (err) {
+      result.textContent = err.message || '连接失败';
+      result.className = 'ai-test-result err';
+    }
+  }
+
+  function defaultRaceDate() {
+    const today = C.parseDate(TODAY);
+    const year = today.getFullYear();
+    // 三月的最后一个周日
+    const lastSunday = (y) => {
+      const d = new Date(y, 3, 0, 12);
+      d.setDate(d.getDate() - ((7 - d.getDay()) % 7));
+      return C.formatDate(d);
+    };
+    let candidate = lastSunday(year);
+    if (candidate <= TODAY) candidate = lastSunday(year + 1);
+    return candidate;
+  }
+
+  function defaultProgramName(raceDate) {
+    const d = C.parseDate(raceDate);
+    return d ? `半马 150 · ${d.getMonth() + 1}月底` : '半马 150';
+  }
+
+  function openAIPlanModal() {
+    const api = aiApi();
+    if (!api) {
+      showToast('AI 模块没有加载，请刷新页面后再试。', 'alert');
+      return;
+    }
+    const settings = api.loadSettings();
+    if (!settings.apiKey) {
+      showToast('请先在上方填写并保存 DeepSeek API Key。', 'alert');
+      const input = document.getElementById('ai-api-key');
+      if (input) input.focus();
+      return;
+    }
+    aiDraft = null;
+    const raceDate = defaultRaceDate();
+    renderAIPlanForm({
+      goal: '半程马拉松',
+      raceDate,
+      target: '1:50:00',
+      current: '',
+      days: [2, 4, 6, 0],
+      maxMinutes: 75,
+      equipment: '户外路跑，跑鞋、心率表',
+      notes: '',
+      programName: defaultProgramName(raceDate)
+    }, '');
+  }
+
+  function renderAIPlanForm(input, errorMessage) {
+    const values = input || {};
+    const days = Array.isArray(values.days) && values.days.length ? values.days : [2, 4, 6, 0];
+    const html = `<div class="modal ai-modal" id="ai-plan-modal">
+      ${modalHead('AI 生成训练计划', '先对齐目标和限制，再让模型排课；写入前你可以逐条修改。')}
+      <div class="modal-body">
+        <div class="form-grid">
+          <label class="field"><span class="field-label">目标赛事</span>
+            <input class="input" id="ai-goal" maxlength="30" value="${attr(values.goal || '半程马拉松')}" placeholder="例如：半程马拉松">
+          </label>
+          <label class="field"><span class="field-label">比赛日期</span>
+            <input type="date" class="input" id="ai-race-date" value="${attr(values.raceDate || defaultRaceDate())}">
+          </label>
+        </div>
+        <div class="form-grid field-block">
+          <label class="field"><span class="field-label">目标成绩</span>
+            <input class="input" id="ai-target" maxlength="20" value="${attr(values.target || '')}" placeholder="例如：1:50:00">
+          </label>
+          <label class="field"><span class="field-label">当前最好成绩 <small>可留空</small></span>
+            <input class="input" id="ai-current" maxlength="20" value="${attr(values.current || '')}" placeholder="例如：2:05:00">
+          </label>
+        </div>
+        <div class="field field-block">
+          <span class="field-label">每周可训练 <small>至少选 2 天，最多 6 天</small></span>
+          <div class="weekday-picker" id="ai-weekdays">
+            ${C.WEEK_ORDER.map((d) => `<button type="button" class="${days.indexOf(d) >= 0 ? 'active' : ''}" data-action="ai-weekday" data-weekday="${d}">周${C.WEEKDAY_SHORT[d]}</button>`).join('')}
+          </div>
+        </div>
+        <div class="form-grid field-block">
+          <label class="field"><span class="field-label">单次最长</span>
+            <select class="input" id="ai-max-minutes">
+              ${[45, 60, 75, 90, 120].map((m) => `<option value="${m}" ${Number(values.maxMinutes) === m ? 'selected' : ''}>${m} 分钟</option>`).join('')}
+            </select>
+          </label>
+          <label class="field"><span class="field-label">计划名称 <small>写入后的项目名</small></span>
+            <input class="input" id="ai-program-name" maxlength="30" value="${attr(values.programName || '')}" placeholder="例如：半马 150 · 3月底">
+          </label>
+        </div>
+        <label class="field field-block"><span class="field-label">场地与器械 <small>可选</small></span>
+          <input class="input" id="ai-equipment" maxlength="60" value="${attr(values.equipment || '')}" placeholder="例如：户外路跑，有健身房和心率带">
+        </label>
+        <label class="field field-block"><span class="field-label">伤病与限制 <small>可选，但请如实写</small></span>
+          <textarea class="input" id="ai-notes" rows="2" maxlength="200" placeholder="例如：右膝旧伤，不能连续两天跑；每周三加班">${esc(values.notes || '')}</textarea>
+        </label>
+        <div class="plan-preview" id="ai-range-hint">选择比赛日期后，这里会估算周期。</div>
+        <div class="alert-line" id="ai-form-error" ${errorMessage ? '' : 'hidden'}>${icon('alert')}<span>${esc(errorMessage || '')}</span></div>
+        <p class="field-hint" style="margin-top:10px">生成后会先进入预览：日期、星期、每周次数、跑量增幅和减量周都会逐条校验，有任何一项不通过都不会写入。</p>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" data-action="close-modal">取消</button>
+        <button class="btn btn-primary" id="ai-generate-btn" data-action="ai-generate">${icon('spark')} 生成计划</button>
+      </div>
+    </div>`;
+    openModal(html, { type: 'ai-plan' });
+    updateAIRangeHint();
+  }
+
+  function updateAIRangeHint() {
+    const dateInput = document.getElementById('ai-race-date');
+    const hint = document.getElementById('ai-range-hint');
+    if (!dateInput || !hint) return;
+    const raceDate = dateInput.value;
+    const activeDays = Array.from(document.querySelectorAll('#ai-weekdays button.active')).map((b) => Number(b.dataset.weekday));
+    if (!raceDate) {
+      hint.className = 'plan-preview error';
+      hint.textContent = '请选择比赛日期。';
+      return;
+    }
+    const span = C.datesBetween(TODAY, raceDate).length - 1;
+    if (span < 7) {
+      hint.className = 'plan-preview error';
+      hint.textContent = '距离比赛不足一周，无法生成可执行的训练计划。';
+      return;
+    }
+    const weeks = Math.ceil(span / 7);
+    hint.className = 'plan-preview';
+    hint.innerHTML = `约 <strong>${weeks} 周</strong> · 每周最多 <strong>${activeDays.length}</strong> 次 · 预计不超过 <strong>${weeks * activeDays.length}</strong> 次训练。模型会自行安排休息周与减量周。`;
+  }
+
+  function collectAIInput() {
+    const days = Array.from(document.querySelectorAll('#ai-weekdays button.active')).map((b) => Number(b.dataset.weekday));
+    return {
+      today: TODAY,
+      startDate: TODAY,
+      goal: document.getElementById('ai-goal').value.trim(),
+      raceDate: document.getElementById('ai-race-date').value,
+      target: document.getElementById('ai-target').value.trim(),
+      current: document.getElementById('ai-current').value.trim(),
+      days,
+      maxMinutes: Number(document.getElementById('ai-max-minutes').value) || 75,
+      equipment: document.getElementById('ai-equipment').value.trim(),
+      notes: document.getElementById('ai-notes').value.trim(),
+      programName: document.getElementById('ai-program-name').value.trim()
+    };
+  }
+
+  function renderAIPlanLoading() {
+    const html = `<div class="modal ai-modal" id="ai-plan-modal">
+      ${modalHead('AI 正在排训练计划', '正在按目标、日期和可训练时间逐周安排…')}
+      <div class="modal-body">
+        <div class="ai-loading">
+          <span class="ai-spinner"></span>
+          <b>通常需要 30–60 秒</b>
+          <p>模型会先排出每周训练，再逐条校验日期、频次、跑量增幅与减量周。校验不通过时不会写入。</p>
+        </div>
+      </div>
+    </div>`;
+    openModal(html, { type: 'ai-plan' });
+  }
+
+  function runAIPlanGeneration() {
+    const api = aiApi();
+    if (!api) return;
+    const input = collectAIInput();
+    const problems = [];
+    if (!input.goal) problems.push('请填写目标赛事。');
+    if (!input.target) problems.push('请填写目标成绩。');
+    if (!input.raceDate) problems.push('请选择比赛日期。');
+    if (input.raceDate && input.raceDate <= TODAY) problems.push('比赛日期需要在今天之后。');
+    if (input.days.length < 2) problems.push('每周至少选择 2 个可训练日。');
+    if (input.days.length > 6) problems.push('每周最多选择 6 天，至少留 1 天休息。');
+    if (!input.programName) problems.push('请填写计划名称。');
+    if (input.raceDate && C.datesBetween(TODAY, input.raceDate).length - 1 < 14) {
+      problems.push('距离比赛不足两周，先不要生成完整训练计划。');
+    }
+    if (problems.length) {
+      const box = document.getElementById('ai-form-error');
+      if (box) {
+        box.hidden = false;
+        box.querySelector('span').textContent = problems.join(' ');
+      }
+      return;
+    }
+
+    startAIPlanGeneration(input);
+  }
+
+  function startAIPlanGeneration(input) {
+    const api = aiApi();
+    aiDraft = { input, plan: null, validation: null };
+    renderAIPlanLoading();
+    api.generatePlan(input).then((result) => {
+      if (!document.getElementById('ai-plan-modal')) return;
+      aiDraft = { input, plan: result.plan, validation: result.validation };
+      renderAIPlanPreview();
+    }).catch((err) => {
+      if (!document.getElementById('ai-plan-modal')) return;
+      aiDraft = null;
+      renderAIPlanForm(input, (err && err.message) || '生成失败，请稍后重试。');
+      showToast('生成失败，输入已保留。', 'alert');
+    });
+  }
+
+  function regenerateAIPlan() {
+    if (!aiDraft) return;
+    syncAIDraftFromDom();
+    startAIPlanGeneration(aiDraft.input);
+  }
+
+  function aiTypeLabel(type) {
+    const map = { easy: '轻松跑', long: '长距离', tempo: '节奏跑', interval: '间歇', strength: '力量', cross: '交叉训练', race: '比赛' };
+    return map[type] || '训练';
+  }
+
+  function aiValidationHTML(validation) {
+    if (!validation) return '';
+    const errors = validation.errors || [];
+    const warnings = validation.warnings || [];
+    const okLine = errors.length ? '' : `<div class="ai-check ok">${icon('check')}<div><b>校验通过${warnings.length ? `，有 ${warnings.length} 条提醒` : ''}</b><span>日期、星期、频次、跑量增幅与减量周都符合规则，可以写入。</span></div></div>`;
+    return `${okLine}
+      ${errors.length ? `<div class="ai-check err">${icon('alert')}<div><b>${errors.length} 项需要修正，暂时不能写入</b><ul>${errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></div></div>` : ''}
+      ${warnings.length ? `<div class="ai-check warn">${icon('alert')}<div><b>提醒</b><ul>${warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div></div>` : ''}`;
+  }
+
+  function renderAIPlanPreview() {
+    if (!aiDraft || !aiDraft.plan) return;
+    const { plan, validation, input } = aiDraft;
+    const stats = validation.stats || { weeks: 0, sessions: 0, totalKm: 0, peakWeekKm: 0 };
+    const weeks = validation.weeks || [];
+    const sessionRow = (s) => `<div class="ai-session" data-date="${attr(s.date)}">
+      <div class="ai-date"><b>${C.monthDayLabel(s.date).replace('月', '/').replace('日', '')}</b><span>周${C.WEEKDAY_SHORT[C.weekday(s.date)]}</span></div>
+      <div class="ai-s-main">
+        <input class="input ai-s-content" maxlength="30" value="${attr(s.content)}" aria-label="训练内容">
+        <span class="ai-s-meta">${s.distanceKm ? `${s.distanceKm} km · ` : ''}${aiTypeLabel(s.type)}${s.note ? ` · ${esc(s.note)}` : ''}</span>
+        <span class="ai-s-items">${(s.deliverables || []).map((d) => esc(d.title)).join(' · ')}</span>
+      </div>
+      <label class="ai-min"><input type="number" class="input ai-s-minutes" min="10" max="${input.maxMinutes}" step="5" value="${s.minutes}" aria-label="训练分钟数"><span>分钟</span></label>
+      <button class="icon-btn bare" data-action="ai-remove-session" data-date="${attr(s.date)}" aria-label="删除这次训练">${icon('x')}</button>
+    </div>`;
+
+    const weekHTML = weeks.map((w) => `<div class="ai-week">
+      <div class="ai-week-head"><b>${w.label}</b><span>${w.volume} km · ${w.sessions.length} 次${w.hasRace ? ' · 比赛周' : ''}</span></div>
+      ${w.sessions.map(sessionRow).join('')}
+    </div>`).join('');
+
+    const html = `<div class="modal ai-modal" id="ai-plan-modal">
+      ${modalHead('确认训练计划', '可以直接改内容与时长；确认后写入 LifeLog，写入前会自动备份。')}
+      <div class="modal-body">
+        <div class="ai-summary">${icon('spark')}<p>${esc(plan.summary || '模型没有给出额外说明。')}</p></div>
+        <div class="ai-stats">
+          <div class="ai-stat"><b>${stats.weeks}</b><span>周</span></div>
+          <div class="ai-stat"><b>${stats.sessions}</b><span>次训练</span></div>
+          <div class="ai-stat"><b>${stats.totalKm}</b><span>总公里</span></div>
+          <div class="ai-stat"><b>${stats.peakWeekKm}</b><span>峰值周 km</span></div>
+        </div>
+        <label class="field field-block"><span class="field-label">项目名称</span>
+          <input class="input" id="ai-preview-program-name" maxlength="30" value="${attr(plan.program.name)}">
+        </label>
+        <div class="ai-phase-list">
+          ${plan.phases.map((p) => `<span class="ai-phase"><b>${esc(p.name)}</b><span>${fmtShort(p.start)} – ${fmtShort(p.end)}</span></span>`).join('')}
+        </div>
+        <div class="ai-validation" id="ai-validation">${aiValidationHTML(validation)}</div>
+        <div class="ai-weeks">${weekHTML}</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost left" data-action="ai-back">${icon('chevron-left')} 返回修改</button>
+        <button class="btn btn-ghost" data-action="ai-regenerate">${icon('refresh')} 重新生成</button>
+        <button class="btn btn-primary" id="ai-commit-btn" data-action="ai-commit" ${validation.errors.length ? 'disabled' : ''}>${icon('check')} 写入 LifeLog</button>
+      </div>
+    </div>`;
+    openModal(html, { type: 'ai-plan' });
+    modalRoot.querySelector('.modal').scrollTop = 0;
+  }
+
+  function syncAIDraftFromDom() {
+    if (!aiDraft || !aiDraft.plan) return;
+    const modal = document.getElementById('ai-plan-modal');
+    if (!modal) return;
+    modal.querySelectorAll('.ai-session').forEach((row) => {
+      const date = row.dataset.date;
+      const session = aiDraft.plan.sessions.find((s) => s.date === date);
+      if (!session) return;
+      const contentInput = row.querySelector('.ai-s-content');
+      const minutesInput = row.querySelector('.ai-s-minutes');
+      if (contentInput && contentInput.value.trim()) session.content = contentInput.value.trim().slice(0, 30);
+      const minutes = Number(minutesInput && minutesInput.value);
+      if (Number.isFinite(minutes) && minutes > 0) {
+        session.minutes = Math.max(10, Math.min(aiDraft.input.maxMinutes, Math.round(minutes / 5) * 5));
+      }
+    });
+    const nameInput = document.getElementById('ai-preview-program-name');
+    if (nameInput && nameInput.value.trim()) aiDraft.plan.program.name = nameInput.value.trim().slice(0, 30);
+    aiDraft.validation = aiApi().validatePlan(aiDraft.plan, aiDraft.input);
+  }
+
+  function refreshAIValidation() {
+    syncAIDraftFromDom();
+    const box = document.getElementById('ai-validation');
+    const button = document.getElementById('ai-commit-btn');
+    if (box) box.innerHTML = aiValidationHTML(aiDraft.validation);
+    if (button) button.disabled = aiDraft.validation.errors.length > 0;
+  }
+
+  function removeAISession(date) {
+    if (!aiDraft || !aiDraft.plan) return;
+    syncAIDraftFromDom();
+    if (aiDraft.plan.sessions.length <= 1) {
+      showToast('至少保留一次训练。', 'alert');
+      return;
+    }
+    aiDraft.plan.sessions = aiDraft.plan.sessions.filter((s) => s.date !== date);
+    aiDraft.validation = aiApi().validatePlan(aiDraft.plan, aiDraft.input);
+    renderAIPlanPreview();
+  }
+
+  function commitAIPlan() {
+    if (!aiDraft || !aiDraft.plan) return;
+    syncAIDraftFromDom();
+    const { plan, input, validation } = aiDraft;
+    if (!validation || validation.errors.length) {
+      refreshAIValidation();
+      showToast('还有校验项未通过，请先修正。', 'alert');
+      return;
+    }
+    const api = aiApi();
+    const settings = api.loadSettings();
+
+    let name = plan.program.name.trim() || input.programName;
+    if (!name) name = 'AI 训练计划';
+    const baseName = name;
+    let suffix = 2;
+    while (state.programs.some((p) => p.name === name)) {
+      name = `${baseName} · ${suffix}`;
+      suffix += 1;
+    }
+    if (!window.confirm(`将新建项目「${name}」并写入 ${plan.sessions.length} 天计划，写入前会自动做一次本地备份。继续吗？`)) return;
+
+    const snapshot = C.makeBackup(state, 'AI 计划写入前');
+    if (!snapshot) {
+      showToast('本地备份失败，可能是存储空间不足。请先导出 JSON 备份再写入。', 'alert');
+      return;
+    }
+
+    const programId = C.uid('ai_program');
+    const phases = plan.phases.map((p) => ({
+      id: C.uid('phase'),
+      name: p.name,
+      start: p.start,
+      end: p.end,
+      weekdays: input.days.slice()
+    }));
+    state.programs.push({
+      id: programId,
+      name,
+      subtitle: plan.program.subtitle || `目标 ${input.target}`,
+      color: plan.program.color,
+      phases,
+      ai: true,
+      createdAt: new Date().toISOString()
+    });
+
+    const created = plan.sessions.map((s) => {
+      const deliverables = s.deliverables.map((d) => ({
+        title: d.title,
+        estimatedUnits: api.minutesToUnits(d.minutes)
+      }));
+      const entry = C.buildEntry(state, programId, s.date, s.content, deliverables, { ai: true });
+      state.entries.push(entry);
+      return entry;
+    });
+
+    state.meta.aiPlans = Array.isArray(state.meta.aiPlans) ? state.meta.aiPlans : [];
+    state.meta.aiPlans.unshift({
+      id: C.uid('aiplan'),
+      programId,
+      programName: name,
+      at: new Date().toISOString(),
+      sessionCount: created.length,
+      entryIds: created.map((e) => e.id),
+      goal: input.goal,
+      target: input.target,
+      raceDate: input.raceDate,
+      model: settings.model
+    });
+    state.meta.aiPlans = state.meta.aiPlans.slice(0, 10);
+
+    persist();
+    closeModal();
+    aiDraft = null;
+    ui.tab = 'calendar';
+    ui.calMonth = created[0].date.slice(0, 7);
+    ui.selectedDate = created[0].date;
+    render();
+    showToast(`已写入 ${created.length} 天训练计划，可在设置里一键撤销。`);
+  }
+
+  function undoAIPlan(recordId) {
+    const list = Array.isArray(state.meta.aiPlans) ? state.meta.aiPlans : [];
+    const record = list.find((r) => r.id === recordId);
+    if (!record) {
+      showToast('找不到这条 AI 计划记录。', 'alert');
+      return;
+    }
+    const count = state.entries.filter((e) => e.programId === record.programId).length;
+    if (!window.confirm(`撤销会删除「${record.programName}」以及它的 ${count} 天计划（包括后来手动加进这个项目的内容）。继续吗？`)) return;
+    const snapshot = C.makeBackup(state, '撤销 AI 计划前');
+    if (!snapshot) {
+      showToast('本地备份失败，暂时不能撤销。', 'alert');
+      return;
+    }
+    const removed = new Set(state.entries.filter((e) => e.programId === record.programId).map((e) => e.id));
+    state.programs = state.programs.filter((p) => p.id !== record.programId);
+    state.entries = state.entries.filter((e) => e.programId !== record.programId);
+    state.adjustments = state.adjustments.filter((a) => !removed.has(a.entryId));
+    state.meta.aiPlans = list.filter((r) => r.id !== recordId);
+    persist();
+    render();
+    showToast('AI 计划已撤销，撤销前的快照已保存在本地备份里。', 'info');
   }
 
   /* ---------------- Modal scaffolding ---------------- */
@@ -1344,6 +1882,9 @@
     const removedEntryIds = new Set(state.entries.filter((e) => e.programId === programId).map((e) => e.id));
     state.entries = state.entries.filter((e) => e.programId !== programId);
     state.adjustments = state.adjustments.filter((a) => !removedEntryIds.has(a.entryId));
+    if (Array.isArray(state.meta.aiPlans)) {
+      state.meta.aiPlans = state.meta.aiPlans.filter((r) => r.programId !== programId);
+    }
     persist();
     closeModal();
     render();
@@ -1711,6 +2252,43 @@
       case 'open-program':
         openProgramModal(target.dataset.program);
         break;
+      case 'ai-save':
+        saveAISettings();
+        break;
+      case 'ai-test':
+        testAIConnection();
+        break;
+      case 'ai-clear-key':
+        clearAIKey();
+        break;
+      case 'open-ai-plan':
+        openAIPlanModal();
+        break;
+      case 'ai-generate':
+        runAIPlanGeneration();
+        break;
+      case 'ai-weekday':
+        target.classList.toggle('active');
+        updateAIRangeHint();
+        break;
+      case 'ai-back':
+        if (aiDraft) {
+          syncAIDraftFromDom();
+          renderAIPlanForm(aiDraft.input, '');
+        }
+        break;
+      case 'ai-regenerate':
+        regenerateAIPlan();
+        break;
+      case 'ai-remove-session':
+        removeAISession(target.dataset.date);
+        break;
+      case 'ai-commit':
+        commitAIPlan();
+        break;
+      case 'ai-undo':
+        undoAIPlan(target.dataset.aiPlan);
+        break;
       case 'program-color': {
         document.querySelectorAll('#program-colors .color-swatch').forEach((b) => b.classList.toggle('active', b === target));
         break;
@@ -1834,6 +2412,12 @@
     if (target.id === 'import-file') {
       handleImportFile(target.files[0]);
       target.value = '';
+    }
+    if (target.id === 'ai-race-date') {
+      updateAIRangeHint();
+    }
+    if (target.classList.contains('ai-s-content') || target.classList.contains('ai-s-minutes')) {
+      refreshAIValidation();
     }
   });
 

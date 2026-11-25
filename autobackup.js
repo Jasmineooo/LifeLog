@@ -5,8 +5,8 @@
   var IDB_FALLBACK = ['yebian-db'];
 
   // 备份时剔除的敏感字段：键名 → 字段名
-  var REDACT = { 'yebian.settings.v1': ['apiKey'] };
-  var REDACTED = ['yebian.settings.v1.apiKey'];
+  var REDACT = { 'yebian.settings.v1': ['apiKey'], 'ai.settings.v1': ['apiKey'] };
+  var REDACTED = ['yebian.settings.v1.apiKey', 'ai.settings.v1.apiKey'];
 
   function redactValue(key, raw) {
     var fields = REDACT[key];
