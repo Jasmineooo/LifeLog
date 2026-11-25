@@ -8,6 +8,7 @@
   'use strict';
 
   const SETTINGS_KEY = 'ai.settings.v1';
+  const AI_VERSION = 'v4';
   const DEFAULT_SETTINGS = { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' };
   const MODEL_PRESETS = [
     { id: 'deepseek-flash', name: 'DeepSeek Flash（快、便宜）', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' },
@@ -390,15 +391,19 @@
   }
 
   async function chatJSON(options) {
+    const withJsonMode = Object.assign({}, options, { jsonMode: true });
+    const withoutJsonMode = Object.assign({}, options, { jsonMode: false });
     try {
-      const content = await chatRaw(Object.assign({}, options, { jsonMode: true }));
+      const content = await chatRaw(withJsonMode);
       return parseJSONLoose(content);
     } catch (err) {
-      if (/json_object|JSON 格式|没有按要求返回 JSON/.test(String(err && err.message))) {
-        const content = await chatRaw(Object.assign({}, options, { jsonMode: false }));
-        return parseJSONLoose(content);
-      }
-      throw err;
+      // 有些中转服务不支持 response_format: json_object，会直接返回空正文；
+      // 这类错误以及纯 JSON 格式问题，都再试一次不带 json_object 的请求。
+      const retryable = (err && err.kind === 'empty')
+        || /json_object|JSON 格式|没有按要求返回 JSON/.test(String(err && err.message));
+      if (!retryable) throw err;
+      const content = await chatRaw(withoutJsonMode);
+      return parseJSONLoose(content);
     }
   }
 
@@ -972,6 +977,7 @@ ${raceRule}
 
   window.LifeLogAI = {
     SETTINGS_KEY,
+    VERSION: AI_VERSION,
     DEFAULT_SETTINGS,
     MODEL_PRESETS,
     loadSettings,

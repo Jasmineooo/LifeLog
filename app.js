@@ -796,7 +796,7 @@
         <button class="btn btn-primary btn-sm" data-action="open-ai-plan">${icon('spark')} 生成训练计划</button>
       </div>
       ${planRows ? `<div class="ai-plan-list"><span class="ai-plan-list-title">最近的 AI 计划</span>${planRows}</div>` : ''}
-      <p class="field-hint" style="margin-top:10px">训练计划由大模型生成，可能不完全适合你。写入前请检查日期与强度，身体不适时以医生和教练意见为准。</p>
+      <p class="field-hint" style="margin-top:10px">训练计划由大模型生成，可能不完全适合你。写入前请检查日期与强度，身体不适时以医生和教练意见为准。<span class="ai-ver">AI 模块 ${esc(api && api.VERSION ? api.VERSION : '—')}</span></p>
     </section>`;
   }
 
