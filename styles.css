@@ -1698,3 +1698,21 @@ select.input { appearance: none; background-image: linear-gradient(45deg, transp
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
 }
+
+/* ---------- 项目详情 / 归档 ---------- */
+.archived-block { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.project-row.is-archived { opacity: .62; }
+.pd-phase { margin-top: 14px; }
+.pd-phase-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.pd-phase-head b { font-size: 12px; color: var(--ink); }
+.pd-phase-head span { font-size: 9.5px; color: var(--faint); }
+.pd-row { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 2px; border: 0; border-bottom: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; }
+.pd-row:last-child { border-bottom: 0; }
+.pd-row:active { background: var(--cream); }
+.pd-date { display: flex; flex-direction: column; align-items: center; min-width: 38px; }
+.pd-date b { font-size: 12px; color: var(--ink); }
+.pd-date i { font-style: normal; font-size: 8.5px; color: var(--faint); }
+.pd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.pd-main b { font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pd-main span { font-size: 9px; color: var(--faint); }
+.pd-score { font-size: 11px; font-weight: 700; color: var(--c, var(--muted)); font-variant-numeric: tabular-nums; }

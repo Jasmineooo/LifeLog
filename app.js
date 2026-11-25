@@ -386,7 +386,7 @@
       const isOther = date.slice(0, 7) !== month;
       const isToday = date === TODAY;
       const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-      const dayEntries = C.entriesForDate(state, date);
+      const dayEntries = C.entriesForDate(state, date).filter((e) => !C.isProgramArchived(state, e.programId));
       const uniquePrograms = Array.from(new Set(dayEntries.map((e) => e.programId)))
         .map((id) => state.programs.find((p) => p.id === id)).filter(Boolean);
       const visible = uniquePrograms.slice(0, 2);
@@ -417,7 +417,7 @@
     const legend = `<div class="side-card">
       <h3>项目图例</h3>
       <div class="cal-legend" style="padding:11px 0 0">
-        ${state.programs.map((p) => `<div class="legend-item"><span class="legend-dot" style="--p:${p.color}"></span>${esc(p.name)}</div>`).join('')}
+        ${state.programs.filter((p) => !p.archived).map((p) => `<div class="legend-item"><span class="legend-dot" style="--p:${p.color}"></span>${esc(p.name)}</div>`).join('')}
       </div>
     </div>`;
 
@@ -642,12 +642,27 @@
     const storageText = bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
     const totalDeliverables = state.entries.reduce((sum, e) => sum + (e.deliverables || []).length, 0);
 
-    const projects = state.programs.map((p) => `<div class="project-row">
+    const projectRow = (p) => {
+      const list = state.entries.filter((e) => e.programId === p.id);
+      const done = list.filter((e) => C.entryScore(e) >= 1).length;
+      return `<div class="project-row ${p.archived ? 'is-archived' : ''}">
       <span class="pdot" style="--p:${p.color}"></span>
-      <div class="pmeta"><b>${esc(p.name)}</b><span>${p.phases.length} 个阶段 · ${C.programTotals(state, p, TODAY).planned} 个计划日</span></div>
-      <span class="pcount">${state.entries.filter((e) => e.programId === p.id).length} 项</span>
+      <div class="pmeta"><b>${esc(p.name)}</b><span>${p.phases.length} 个阶段 · ${list.length} 个计划${list.length ? ` · 已完成 ${done}` : ''}</span></div>
+      <button class="text-btn" data-action="program-detail" data-program="${p.id}">查看计划</button>
       <button class="icon-btn bare" data-action="open-program" data-program="${p.id}" aria-label="编辑 ${esc(p.name)}">${icon('edit')}</button>
-    </div>`).join('');
+    </div>`;
+    };
+
+    const activeProjects = state.programs.filter((p) => !p.archived).map(projectRow).join('');
+    const archivedProjects = state.programs.filter((p) => p.archived);
+    const archivedHTML = archivedProjects.length
+      ? `<div class="archived-block"><span class="ai-plan-list-title">已归档</span>${archivedProjects.map((p) => `<div class="project-row is-archived">
+          <span class="pdot" style="--p:${p.color}"></span>
+          <div class="pmeta"><b>${esc(p.name)}</b><span>${state.entries.filter((e) => e.programId === p.id).length} 个计划</span></div>
+          <button class="text-btn" data-action="program-detail" data-program="${p.id}">查看</button>
+          <button class="text-btn" data-action="program-unarchive" data-program="${p.id}">恢复</button>
+        </div>`).join('')}</div>`
+      : '';
 
     return `<section class="page">
       <div class="page-head">
@@ -676,7 +691,7 @@
               <div><h2>我的项目</h2><p>以后新增项目或调整阶段，都在这里</p></div>
               <button class="btn btn-soft btn-sm" data-action="open-program">${icon('plus')} 新增</button>
             </div>
-            <div class="project-list">${projects}</div>
+            <div class="project-list">${activeProjects}${archivedHTML}</div>
           </section>
 
           <section class="settings-card card">
@@ -1845,7 +1860,7 @@
 
   function openDayModal(date) {
     const aggregate = C.dayAggregate(state, date);
-    const entries = aggregate.entries;
+    const entries = aggregate.entries.filter((e) => !C.isProgramArchived(state, e.programId));
     const info = C.colorInfo(aggregate.score, aggregate.hasPlan);
     const list = entries.length ? `<div class="day-entry-list">${entries.map((entry) => {
       const program = C.programById(state, entry.programId);
@@ -1918,6 +1933,80 @@
         ${C.WEEK_ORDER.map((d) => `<button type="button" class="mini-weekday ${weekdays.includes(d) ? 'active' : ''}" data-action="phase-weekday" data-weekday="${d}">${C.WEEKDAY_SHORT[d]}</button>`).join('')}
       </div>
     </div>`;
+  }
+
+  // 项目详情：按阶段列出这个项目的全部计划日
+  function openProgramDetail(programId) {
+    const program = C.programById(state, programId);
+    if (!program) {
+      showToast('找不到这个项目。', 'alert');
+      return;
+    }
+    const entries = state.entries
+      .filter((e) => e.programId === programId)
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const phases = (program.phases || []).slice().sort((a, b) => (a.start < b.start ? -1 : 1));
+    const done = entries.filter((e) => C.entryScore(e) >= 1).length;
+    const avg = entries.length ? entries.reduce((sum, e) => sum + C.entryScore(e), 0) / entries.length : 0;
+
+    const row = (e) => {
+      const score = C.entryScore(e);
+      const recorded = C.entryRecordedCount(e) > 0;
+      const info = C.colorInfo(score, true);
+      return `<button class="pd-row" data-action="program-detail-day" data-date="${e.date}">
+        <span class="pd-date"><b>${C.monthDayLabel(e.date).replace('月', '/').replace('日', '')}</b><i>周${C.WEEKDAY_SHORT[C.weekday(e.date)]}</i></span>
+        <span class="pd-main"><b>${esc(e.content)}</b><span>${(e.deliverables || []).length} 个交付物 · ${recorded ? (score >= 1 ? '已完成' : '已记录') : (e.date <= TODAY ? '未记录' : '待执行')}</span></span>
+        <span class="pd-score" style="--c:${info.color}">${recorded ? score.toFixed(2) : '—'}</span>
+      </button>`;
+    };
+
+    const sections = phases.map((ph) => {
+      const list = entries.filter((e) => e.date >= ph.start && e.date <= ph.end);
+      return `<div class="pd-phase">
+        <div class="pd-phase-head"><b>${esc(ph.name)}</b><span>${fmtShort(ph.start)} – ${fmtShort(ph.end)} · ${list.length} 次</span></div>
+        ${list.length ? list.map(row).join('') : '<p class="field-hint">这个阶段还没有安排计划。</p>'}
+      </div>`;
+    }).join('');
+    const outside = entries.filter((e) => !phases.some((ph) => e.date >= ph.start && e.date <= ph.end));
+    const outsideHTML = outside.length
+      ? `<div class="pd-phase"><div class="pd-phase-head"><b>不在任何阶段内</b><span>${outside.length} 次</span></div>${outside.map(row).join('')}</div>`
+      : '';
+
+    const html = `<div class="modal" id="program-detail-modal">
+      ${modalHead(program.name, `${program.phases.length} 个阶段 · ${entries.length} 个计划日${program.archived ? ' · 已归档' : ''}`)}
+      <div class="modal-body">
+        <div class="ai-stats">
+          <div class="ai-stat"><b>${entries.length}</b><span>计划日</span></div>
+          <div class="ai-stat"><b>${done}</b><span>已完成</span></div>
+          <div class="ai-stat"><b>${entries.length ? avg.toFixed(2) : '—'}</b><span>平均完成度</span></div>
+        </div>
+        ${sections || '<p class="field-hint">这个项目还没有计划，去日历里安排一天试试。</p>'}
+        ${outsideHTML}
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost left" data-action="program-archive" data-program="${program.id}">${program.archived ? '恢复项目' : '归档项目'}</button>
+        <button class="btn btn-soft" data-action="open-program" data-program="${program.id}">${icon('edit')} 编辑阶段</button>
+        <button class="btn btn-primary" data-action="close-modal">关闭</button>
+      </div>
+    </div>`;
+    openModal(html, { type: 'program-detail' });
+  }
+
+  function toggleProgramArchive(programId) {
+    const program = C.programById(state, programId);
+    if (!program) return;
+    const archiving = !program.archived;
+    if (archiving && !window.confirm(`归档「${program.name}」后，它的计划不再显示在今日和日历里，历史统计与记录都会保留，可随时恢复。继续吗？`)) return;
+    if (!C.makeBackup(state, archiving ? '归档项目前' : '恢复项目前')) {
+      showToast('本地备份失败，可能是存储空间不足。请先导出备份。', 'alert');
+      return;
+    }
+    program.archived = archiving;
+    program.archivedAt = archiving ? new Date().toISOString() : null;
+    persist();
+    closeModal();
+    render();
+    showToast(archiving ? '已归档，可在「已归档」里恢复。' : '已恢复项目。');
   }
 
   function openProgramModal(programId) {
@@ -2412,6 +2501,21 @@
       }
       case 'open-program':
         openProgramModal(target.dataset.program);
+        break;
+      case 'program-detail':
+        openProgramDetail(target.dataset.program);
+        break;
+      case 'program-detail-day':
+        closeModal();
+        ui.tab = 'today';
+        ui.selectedDate = target.dataset.date;
+        render();
+        break;
+      case 'program-archive':
+        toggleProgramArchive(target.dataset.program);
+        break;
+      case 'program-unarchive':
+        toggleProgramArchive(target.dataset.program);
         break;
       case 'ai-save':
         saveAISettings();

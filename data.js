@@ -229,6 +229,11 @@
     return state.programs.find((p) => p.id === id) || null;
   }
 
+  function isProgramArchived(state, id) {
+    const program = programById(state, id);
+    return Boolean(program && program.archived);
+  }
+
   function entriesForDate(state, date) {
     return state.entries
       .filter((e) => e.date === date)
@@ -800,6 +805,7 @@
     quoteForDate,
     phaseForDate,
     programById,
+    isProgramArchived,
     entriesForDate,
     entriesForProgramDate,
     entryScore,
