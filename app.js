@@ -759,10 +759,18 @@
     const configured = Boolean(settings.apiKey);
     const plans = (state.meta && Array.isArray(state.meta.aiPlans)) ? state.meta.aiPlans.slice(0, 3) : [];
     const modelOptions = (api ? api.MODEL_PRESETS : []).map((m) => `<option value="${attr(m.model)}">${esc(m.name)}</option>`).join('');
-    const planRows = plans.map((p) => `<div class="ai-plan-row">
-      <div><b>${esc(p.programName || 'AI 训练计划')}</b><span>${esc(formatBackupTime(p.at))} · ${Number(p.sessionCount) || 0} 次训练</span></div>
-      <button class="text-btn" data-action="ai-undo" data-ai-plan="${attr(p.id)}">撤销</button>
-    </div>`).join('');
+    const planRows = plans.map((p) => {
+      const done = Number(p.nextWeekIndex) || 0;
+      const total = Number(p.totalWeeks) || 0;
+      const progress = total ? `已排 ${done}/${total} 周 · ${Number(p.sessionCount) || 0} 次训练` : `${Number(p.sessionCount) || 0} 次训练`;
+      return `<div class="ai-plan-row">
+      <div><b>${esc(p.programName || 'AI 训练计划')}</b><span>${esc(progress)} · ${esc(formatBackupTime(p.at))}</span></div>
+      <div class="ai-plan-actions">
+        ${total > done ? `<button class="text-btn" data-action="ai-continue" data-ai-plan="${attr(p.id)}">再排两周</button>` : ''}
+        <button class="text-btn" data-action="ai-undo" data-ai-plan="${attr(p.id)}">撤销</button>
+      </div>
+    </div>`;
+    }).join('');
 
     return `<section class="settings-card card ai-card">
       <div class="settings-card-head">
@@ -792,11 +800,11 @@
         <span class="ai-test-result" id="ai-test-result"></span>
       </div>
       <div class="ai-plan-entry">
-        <div><b>从目标到日程</b><span>填写比赛日期、目标成绩和可训练时间，AI 排出每次训练，你确认后再写入。</span></div>
+        <div><b>从目标到日程</b><span>每次只排未来 2 周（约 8 次训练），用完点「再排两周」。请求小、更省 token。</span></div>
         <button class="btn btn-primary btn-sm" data-action="open-ai-plan">${icon('spark')} 生成训练计划</button>
       </div>
       ${planRows ? `<div class="ai-plan-list"><span class="ai-plan-list-title">最近的 AI 计划</span>${planRows}</div>` : ''}
-      <p class="field-hint" style="margin-top:10px">训练计划由大模型生成，可能不完全适合你。写入前请检查日期与强度。如果提示「额度都用在思考上」，请把模型换成非思考型（例如 deepseek-chat）。<span class="ai-ver">AI 模块 ${esc(api && api.VERSION ? api.VERSION : '—')}</span></p>
+      <p class="field-hint" style="margin-top:10px">模型会自己决定课型（轻松跑、节奏跑、间歇、长距离、力量）与内容，程序只负责给可选日期和跑量参考，并按规则校验。写入前请检查强度。<span class="ai-ver">AI 模块 ${esc(api && api.VERSION ? api.VERSION : '—')}</span></p>
     </section>`;
   }
 
@@ -874,9 +882,11 @@
     return candidate;
   }
 
-  function defaultProgramName(raceDate) {
+  function defaultProgramName(raceDate, goal, target) {
     const d = C.parseDate(raceDate);
-    return d ? `半马 150 · ${d.getMonth() + 1}月底` : '半马 150';
+    const tail = d ? ` · ${d.getMonth() + 1}月底` : '';
+    const head = `${String(goal || '').replace(/目标|计划/g, '').replace(/程马拉松|马拉松/, '').trim() || '备赛'}${target ? ` ${String(target).replace(/^0:/, '')}` : ''}`.trim();
+    return `${head}${tail}`;
   }
 
   function openAIPlanModal() {
@@ -894,16 +904,19 @@
     }
     aiDraft = null;
     const raceDate = defaultRaceDate();
+    const goal = '半程马拉松';
+    const target = '1:50:00';
     renderAIPlanForm({
-      goal: '半程马拉松',
+      goal,
       raceDate,
-      target: '1:50:00',
+      target,
       current: '',
       days: [2, 4, 6, 0],
-      maxMinutes: 75,
+      maxSessions: 4,
+      maxMinutes: 120,
       equipment: '户外路跑，跑鞋、心率表',
       notes: '',
-      programName: defaultProgramName(raceDate)
+      programName: defaultProgramName(raceDate, goal, target)
     }, '');
   }
 
@@ -938,13 +951,18 @@
         <div class="form-grid field-block">
           <label class="field"><span class="field-label">单次最长</span>
             <select class="input" id="ai-max-minutes">
-              ${[45, 60, 75, 90, 120].map((m) => `<option value="${m}" ${Number(values.maxMinutes) === m ? 'selected' : ''}>${m} 分钟</option>`).join('')}
+              ${[45, 60, 75, 90, 120, 150, 180].map((m) => `<option value="${m}" ${Number(values.maxMinutes) === m ? 'selected' : ''}>${m} 分钟</option>`).join('')}
             </select>
           </label>
-          <label class="field"><span class="field-label">计划名称 <small>写入后的项目名</small></span>
-            <input class="input" id="ai-program-name" maxlength="30" value="${attr(values.programName || '')}" placeholder="例如：半马 150 · 3月底">
+          <label class="field"><span class="field-label">每周最多训练 <small>从勾选的日子里挑</small></span>
+            <select class="input" id="ai-max-sessions">
+              ${[2, 3, 4, 5, 6].map((n) => `<option value="${n}" ${Number(values.maxSessions || days.length) === n ? 'selected' : ''}>${n} 次</option>`).join('')}
+            </select>
           </label>
         </div>
+        <label class="field field-block"><span class="field-label">计划名称 <small>写入后的项目名</small></span>
+          <input class="input" id="ai-program-name" maxlength="30" value="${attr(values.programName || '')}" placeholder="例如：半马 150 · 3月底">
+        </label>
         <label class="field field-block"><span class="field-label">场地与器械 <small>可选</small></span>
           <input class="input" id="ai-equipment" maxlength="60" value="${attr(values.equipment || '')}" placeholder="例如：户外路跑，有健身房和心率带">
         </label>
@@ -961,7 +979,36 @@
       </div>
     </div>`;
     openModal(html, { type: 'ai-plan' });
+    clampAISessionCap();
     updateAIRangeHint();
+  }
+
+  // 每周次数不能超过勾选的可训练天数
+  function clampAISessionCap() {
+    const select = document.getElementById('ai-max-sessions');
+    if (!select) return;
+    const activeCount = document.querySelectorAll('#ai-weekdays button.active').length;
+    Array.from(select.options).forEach((opt) => {
+      opt.disabled = Number(opt.value) > activeCount;
+    });
+    if (Number(select.value) > activeCount) {
+      select.value = String(Math.max(2, Math.min(activeCount, 6)));
+    }
+  }
+
+  // 备注里写了「最多四天」时，自动把每周上限调下来
+  function applyNoteSessionCap() {
+    const notes = document.getElementById('ai-notes');
+    const select = document.getElementById('ai-max-sessions');
+    if (!notes || !select) return;
+    const m = /最多[^0-9一二两三四五六]{0,4}([1-6一二两三四五六])\s*(?:天|次)/.exec(notes.value);
+    if (!m) return;
+    const map = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
+    const n = /[1-6]/.test(m[1]) ? Number(m[1]) : map[m[1]];
+    if (n && n < Number(select.value)) {
+      select.value = String(n);
+      showToast(`已按备注把每周训练上限设为 ${n} 次。`, 'info');
+    }
   }
 
   function updateAIRangeHint() {
@@ -982,8 +1029,10 @@
       return;
     }
     const weeks = Math.ceil(span / 7);
+    const capSelect = document.getElementById('ai-max-sessions');
+    const cap = capSelect ? Number(capSelect.value) : activeDays.length;
     hint.className = 'plan-preview';
-    hint.innerHTML = `约 <strong>${weeks} 周</strong> · 每周最多 <strong>${activeDays.length}</strong> 次 · 预计不超过 <strong>${weeks * activeDays.length}</strong> 次训练。模型会自行安排休息周与减量周。`;
+    hint.innerHTML = `约 <strong>${weeks} 周</strong> · 每周最多 <strong>${Math.min(cap, activeDays.length)}</strong> 次。每次只生成前 2 周，用完点「再排两周」继续，避免一次消耗大量 token。`;
   }
 
   function collectAIInput() {
@@ -997,6 +1046,7 @@
       current: document.getElementById('ai-current').value.trim(),
       days,
       maxMinutes: Number(document.getElementById('ai-max-minutes').value) || 75,
+      maxSessions: Number(document.getElementById('ai-max-sessions').value) || days.length,
       equipment: document.getElementById('ai-equipment').value.trim(),
       notes: document.getElementById('ai-notes').value.trim(),
       programName: document.getElementById('ai-program-name').value.trim()
@@ -1015,13 +1065,13 @@
   function renderAIPlanLoading() {
     stopAILoadingTimer();
     const html = `<div class="modal ai-modal" id="ai-plan-modal">
-      ${modalHead('AI 正在排训练计划', '正在按目标、日期和可训练时间逐周安排…')}
+      ${modalHead('AI 正在排训练计划', '本次只排未来 2 周，请求更小，思考型模型也不容易跑满额度。')}
       <div class="modal-body">
         <div class="ai-loading">
           <span class="ai-spinner"></span>
           <b>已等待 <span id="ai-elapsed">0</span> 秒</b>
-          <span class="ai-stage" id="ai-stage">正在生成完整计划</span>
-          <p>计划较长时通常需要 1–3 分钟。若整份生成失败，会自动改为分段生成；请不要关闭页面。</p>
+          <span class="ai-stage" id="ai-stage">正在排这 2 周的训练内容</span>
+          <p>通常 10–40 秒。请不要关闭页面。</p>
         </div>
       </div>
     </div>`;
@@ -1065,33 +1115,30 @@
     startAIPlanGeneration(input);
   }
 
-  function startAIPlanGeneration(input) {
+  function startAIPlanGeneration(input, options) {
     const api = aiApi();
+    const opts = options || {};
     aiDraft = { input, plan: null, validation: null };
     renderAIPlanLoading();
     const onStage = (stage) => {
       const el = document.getElementById('ai-stage');
       if (!el || !stage) return;
-      if (stage.stage === 'chunk') {
-        el.textContent = `整份生成未成功，正在分段生成：第 ${stage.index}/${stage.total} 段`;
-      } else {
-        el.textContent = '正在生成完整计划';
-      }
+      el.textContent = `正在排第 ${stage.index} / 共 ${stage.total} 周（本次 2 周）`;
     };
-    api.generatePlan(input, onStage).then((result) => {
+    api.generateBatch(input, opts.fromWeek || 0, onStage).then((result) => {
       if (!document.getElementById('ai-plan-modal')) return;
       aiDraft = {
         input,
         plan: result.plan,
         validation: result.validation,
-        mode: result.mode,
-        failedChunks: result.failedChunks || []
+        batch: result.batch,
+        degraded: result.degraded,
+        degradedReason: result.error || '',
+        continueId: opts.continueId || ''
       };
       renderAIPlanPreview();
-      if (result.mode === 'chunked' && !aiDraft.failedChunks.length) {
-        showToast('整份生成未成功，已改用分段生成完成。', 'info');
-      } else if (aiDraft.failedChunks.length) {
-        showToast('有部分段落没拿到 AI 文字，已用默认训练名填充，可直接修改。', 'alert');
+      if (result.degraded) {
+        showToast('这次没拿到 AI 文字，已用默认训练名排出两周，可手动修改或重试。', 'alert');
       }
     }).catch((err) => {
       if (!document.getElementById('ai-plan-modal')) return;
@@ -1101,10 +1148,28 @@
     });
   }
 
+  function continueAIPlan(recordId) {
+    const list = Array.isArray(state.meta.aiPlans) ? state.meta.aiPlans : [];
+    const record = list.find((r) => r.id === recordId);
+    if (!record || !record.input) {
+      showToast('找不到这份计划的参数，请重新生成。', 'alert');
+      return;
+    }
+    if (Number(record.nextWeekIndex) >= Number(record.totalWeeks)) {
+      showToast('这份计划已经排完了。', 'info');
+      return;
+    }
+    startAIPlanGeneration(record.input, {
+      fromWeek: Number(record.nextWeekIndex) || 0,
+      continueId: record.id
+    });
+  }
+
   function regenerateAIPlan() {
     if (!aiDraft) return;
     syncAIDraftFromDom();
-    startAIPlanGeneration(aiDraft.input);
+    const fromWeek = aiDraft.batch ? aiDraft.batch.from : 0;
+    startAIPlanGeneration(aiDraft.input, { fromWeek, continueId: aiDraft.continueId || '' });
   }
 
   function aiTypeLabel(type) {
@@ -1125,9 +1190,14 @@
   function renderAIPlanPreview() {
     if (!aiDraft || !aiDraft.plan) return;
     stopAILoadingTimer();
-    const { plan, validation, input } = aiDraft;
+    const { plan, validation, input, batch } = aiDraft;
     const stats = validation.stats || { weeks: 0, sessions: 0, totalKm: 0, peakWeekKm: 0 };
     const weeks = validation.weeks || [];
+    const isContinue = Boolean(aiDraft.continueId);
+    const remain = batch ? Math.max(0, batch.total - batch.to) : 0;
+    const batchNote = batch
+      ? `本次排第 ${batch.from + 1}–${batch.to} 周，共 ${batch.total} 周${remain ? `，还剩 ${remain} 周` : '（已排完）'}`
+      : '';
     const sessionRow = (s) => `<div class="ai-session" data-date="${attr(s.date)}">
       <div class="ai-date"><b>${C.monthDayLabel(s.date).replace('月', '/').replace('日', '')}</b><span>周${C.WEEKDAY_SHORT[C.weekday(s.date)]}</span></div>
       <div class="ai-s-main">
@@ -1145,28 +1215,29 @@
     </div>`).join('');
 
     const html = `<div class="modal ai-modal" id="ai-plan-modal">
-      ${modalHead('确认训练计划', '可以直接改内容与时长；确认后写入 LifeLog，写入前会自动备份。')}
+      ${modalHead(isContinue ? '继续排下两周' : '确认训练计划', '可以直接改内容与时长；确认后写入 LifeLog，写入前会自动备份。')}
       <div class="modal-body">
-        <div class="ai-summary">${icon('spark')}<p>${esc(plan.summary || '模型没有给出额外说明。')}</p></div>
+        ${batchNote ? `<div class="plan-preview" style="margin-bottom:10px">${icon('calendar')} ${esc(batchNote)}。每次只请求 2 周，更省 token。</div>` : ''}
+        <div class="ai-summary">${icon('spark')}<p>${esc(plan.summary || (aiDraft.degraded ? '这次没有拿到模型说明，课表按目标自动排好。' : '模型没有给出额外说明。'))}</p></div>
         <div class="ai-stats">
           <div class="ai-stat"><b>${stats.weeks}</b><span>周</span></div>
           <div class="ai-stat"><b>${stats.sessions}</b><span>次训练</span></div>
           <div class="ai-stat"><b>${stats.totalKm}</b><span>总公里</span></div>
           <div class="ai-stat"><b>${stats.peakWeekKm}</b><span>峰值周 km</span></div>
         </div>
-        <label class="field field-block"><span class="field-label">项目名称</span>
+        ${isContinue ? '' : `<label class="field field-block"><span class="field-label">项目名称</span>
           <input class="input" id="ai-preview-program-name" maxlength="30" value="${attr(plan.program.name)}">
         </label>
         <div class="ai-phase-list">
           ${plan.phases.map((p) => `<span class="ai-phase"><b>${esc(p.name)}</b><span>${fmtShort(p.start)} – ${fmtShort(p.end)}</span></span>`).join('')}
-        </div>
-        <div class="ai-validation" id="ai-validation">${(aiDraft.failedChunks || []).length ? `<div class="ai-check warn">${icon('alert')}<div><b>有 ${aiDraft.failedChunks.length} 段没拿到 AI 文字</b><span>日期与跑量已按目标排好，训练名称用默认值，可直接在下面改。</span></div></div>` : ''}${aiValidationHTML(validation)}</div>
+        </div>`}
+        <div class="ai-validation" id="ai-validation">${aiDraft.degraded ? `<div class="ai-check warn">${icon('alert')}<div><b>这次没拿到 AI 文字</b><span>日期与跑量已按目标排好，训练名称是默认值，可直接在下面改，或点「重新生成」。</span></div></div>` : ''}${aiValidationHTML(validation)}</div>
         <div class="ai-weeks">${weekHTML}</div>
       </div>
       <div class="modal-foot">
         <button class="btn btn-ghost left" data-action="ai-back">${icon('chevron-left')} 返回修改</button>
         <button class="btn btn-ghost" data-action="ai-regenerate">${icon('refresh')} 重新生成</button>
-        <button class="btn btn-primary" id="ai-commit-btn" data-action="ai-commit" ${validation.errors.length ? 'disabled' : ''}>${icon('check')} 写入 LifeLog</button>
+        <button class="btn btn-primary" id="ai-commit-btn" data-action="ai-commit" ${validation.errors.length ? 'disabled' : ''}>${icon('check')} ${isContinue ? '写入这两周' : '写入 LifeLog'}</button>
       </div>
     </div>`;
     openModal(html, { type: 'ai-plan' });
@@ -1191,7 +1262,7 @@
     });
     const nameInput = document.getElementById('ai-preview-program-name');
     if (nameInput && nameInput.value.trim()) aiDraft.plan.program.name = nameInput.value.trim().slice(0, 30);
-    aiDraft.validation = aiApi().validatePlan(aiDraft.plan, aiDraft.input);
+    aiDraft.validation = aiApi().validatePlan(aiDraft.plan, aiDraft.input, { partial: true });
   }
 
   function refreshAIValidation() {
@@ -1210,14 +1281,27 @@
       return;
     }
     aiDraft.plan.sessions = aiDraft.plan.sessions.filter((s) => s.date !== date);
-    aiDraft.validation = aiApi().validatePlan(aiDraft.plan, aiDraft.input);
+    aiDraft.validation = aiApi().validatePlan(aiDraft.plan, aiDraft.input, { partial: true });
     renderAIPlanPreview();
+  }
+
+  function createAIEntries(programId, sessions) {
+    const api = aiApi();
+    return sessions.map((s) => {
+      const deliverables = s.deliverables.map((d) => ({
+        title: d.title,
+        estimatedUnits: api.minutesToUnits(d.minutes)
+      }));
+      const entry = C.buildEntry(state, programId, s.date, s.content, deliverables, { ai: true });
+      state.entries.push(entry);
+      return entry;
+    });
   }
 
   function commitAIPlan() {
     if (!aiDraft || !aiDraft.plan) return;
     syncAIDraftFromDom();
-    const { plan, input, validation } = aiDraft;
+    const { plan, input, validation, batch } = aiDraft;
     if (!validation || validation.errors.length) {
       refreshAIValidation();
       showToast('还有校验项未通过，请先修正。', 'alert');
@@ -1225,7 +1309,46 @@
     }
     const api = aiApi();
     const settings = api.loadSettings();
+    const records = Array.isArray(state.meta.aiPlans) ? state.meta.aiPlans : [];
 
+    // 继续排：追加到已有项目
+    const record = aiDraft.continueId ? records.find((r) => r.id === aiDraft.continueId) : null;
+    if (record) {
+      const program = C.programById(state, record.programId);
+      if (!program) {
+        showToast('原计划已被删除，请重新生成一份。', 'alert');
+        return;
+      }
+      const clash = plan.sessions.filter((s) => state.entries.some((e) => e.programId === record.programId && e.date === s.date));
+      if (clash.length) {
+        showToast(`这 ${clash.length} 天已经有安排，请先删除重复项。`, 'alert');
+        return;
+      }
+      if (!window.confirm(`往「${record.programName}」追加 ${plan.sessions.length} 天训练，写入前会自动备份。继续吗？`)) return;
+      if (!C.makeBackup(state, 'AI 计划追加前')) {
+        showToast('本地备份失败，可能是存储空间不足。请先导出 JSON 备份。', 'alert');
+        return;
+      }
+      const created = createAIEntries(record.programId, plan.sessions);
+      record.nextWeekIndex = batch ? batch.to : (Number(record.nextWeekIndex) || 0);
+      record.sessionCount = (Number(record.sessionCount) || 0) + created.length;
+      record.entryIds = (Array.isArray(record.entryIds) ? record.entryIds : []).concat(created.map((e) => e.id));
+      record.at = new Date().toISOString();
+      persist();
+      closeModal();
+      aiDraft = null;
+      ui.tab = 'calendar';
+      if (created.length) {
+        ui.calMonth = created[0].date.slice(0, 7);
+        ui.selectedDate = created[0].date;
+      }
+      render();
+      const remain = batch ? Math.max(0, batch.total - batch.to) : 0;
+      showToast(remain ? `已追加 ${created.length} 天，还剩 ${remain} 周可继续排。` : `已追加 ${created.length} 天，这份计划排完了。`);
+      return;
+    }
+
+    // 首段：新建项目
     let name = plan.program.name.trim() || input.programName;
     if (!name) name = 'AI 训练计划';
     const baseName = name;
@@ -1236,8 +1359,7 @@
     }
     if (!window.confirm(`将新建项目「${name}」并写入 ${plan.sessions.length} 天计划，写入前会自动做一次本地备份。继续吗？`)) return;
 
-    const snapshot = C.makeBackup(state, 'AI 计划写入前');
-    if (!snapshot) {
+    if (!C.makeBackup(state, 'AI 计划写入前')) {
       showToast('本地备份失败，可能是存储空间不足。请先导出 JSON 备份再写入。', 'alert');
       return;
     }
@@ -1260,17 +1382,9 @@
       createdAt: new Date().toISOString()
     });
 
-    const created = plan.sessions.map((s) => {
-      const deliverables = s.deliverables.map((d) => ({
-        title: d.title,
-        estimatedUnits: api.minutesToUnits(d.minutes)
-      }));
-      const entry = C.buildEntry(state, programId, s.date, s.content, deliverables, { ai: true });
-      state.entries.push(entry);
-      return entry;
-    });
+    const created = createAIEntries(programId, plan.sessions);
 
-    state.meta.aiPlans = Array.isArray(state.meta.aiPlans) ? state.meta.aiPlans : [];
+    state.meta.aiPlans = records;
     state.meta.aiPlans.unshift({
       id: C.uid('aiplan'),
       programId,
@@ -1281,7 +1395,10 @@
       goal: input.goal,
       target: input.target,
       raceDate: input.raceDate,
-      model: settings.model
+      model: settings.model,
+      input,
+      nextWeekIndex: batch ? batch.to : 0,
+      totalWeeks: batch ? batch.total : 0
     });
     state.meta.aiPlans = state.meta.aiPlans.slice(0, 10);
 
@@ -1292,7 +1409,8 @@
     ui.calMonth = created[0].date.slice(0, 7);
     ui.selectedDate = created[0].date;
     render();
-    showToast(`已写入 ${created.length} 天训练计划，可在设置里一键撤销。`);
+    const remain = batch ? Math.max(0, batch.total - batch.to) : 0;
+    showToast(remain ? `已写入 ${created.length} 天（前 2 周），还剩 ${remain} 周，可在设置里点「再排两周」。` : `已写入 ${created.length} 天训练计划。`);
   }
 
   function undoAIPlan(recordId) {
@@ -2312,6 +2430,7 @@
         break;
       case 'ai-weekday':
         target.classList.toggle('active');
+        clampAISessionCap();
         updateAIRangeHint();
         break;
       case 'ai-back':
@@ -2331,6 +2450,9 @@
         break;
       case 'ai-undo':
         undoAIPlan(target.dataset.aiPlan);
+        break;
+      case 'ai-continue':
+        continueAIPlan(target.dataset.aiPlan);
         break;
       case 'program-color': {
         document.querySelectorAll('#program-colors .color-swatch').forEach((b) => b.classList.toggle('active', b === target));
@@ -2457,6 +2579,13 @@
       target.value = '';
     }
     if (target.id === 'ai-race-date') {
+      updateAIRangeHint();
+    }
+    if (target.id === 'ai-notes') {
+      applyNoteSessionCap();
+      updateAIRangeHint();
+    }
+    if (target.id === 'ai-max-sessions') {
       updateAIRangeHint();
     }
     if (target.classList.contains('ai-s-content') || target.classList.contains('ai-s-minutes')) {

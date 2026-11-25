@@ -1,4 +1,4 @@
-/* LifeLog — DeepSeek 接入与训练计划生成
+﻿/* LifeLog — DeepSeek 接入与训练计划生成
  * 说明：
  * 1. 配置存在 ai.settings.v1，Key 只留在本机；备份中心会自动剔除 apiKey。
  * 2. 模型返回的 JSON 会先经过结构化校验，不通过不进入写入流程。
@@ -8,7 +8,7 @@
   'use strict';
 
   const SETTINGS_KEY = 'ai.settings.v1';
-  const AI_VERSION = 'v5';
+  const AI_VERSION = 'v11';
   const DEFAULT_SETTINGS = { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' };
   const MODEL_PRESETS = [
     { id: 'deepseek-flash', name: 'DeepSeek Flash（快、便宜）', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' },
@@ -391,13 +391,19 @@
   }
 
   async function chatJSON(options) {
-    // 依次尝试：标准 → 去掉 json_object → 再加大额度并强化"少思考"提示
+    // 依次尝试：标准 → 去掉 json_object（额度小幅上调）
+    // lowBudget 模式只给两次、且上限很小，避免思考型模型把额度拉满
     const base = options.maxTokens || 4000;
-    const attempts = [
-      { jsonMode: true, maxTokens: base, hint: '' },
-      { jsonMode: false, maxTokens: Math.max(base, 8000), hint: '' },
-      { jsonMode: false, maxTokens: Math.max(base, 16000), hint: '直接输出结果，不要输出任何思考、分析或解释过程。' }
-    ];
+    const attempts = options.lowBudget
+      ? [
+        { jsonMode: true, maxTokens: base, hint: '' },
+        { jsonMode: false, maxTokens: base * 2, hint: '直接给出结果，最多思考 3 步，不要输出思考过程。' }
+      ]
+      : [
+        { jsonMode: true, maxTokens: base, hint: '' },
+        { jsonMode: false, maxTokens: Math.max(base, 8000), hint: '' },
+        { jsonMode: false, maxTokens: Math.max(base, 16000), hint: '直接输出结果，不要输出任何思考、分析或解释过程。' }
+      ];
     let lastError = null;
     for (let i = 0; i < attempts.length; i += 1) {
       const attempt = attempts[i];
@@ -434,68 +440,9 @@
     return String(text || '').trim();
   }
 
-  /* ---------------- 训练计划生成 ---------------- */
+  /* ---------------- 训练计划生成（每次只排 2 周，控制 token） ---------------- */
 
-  const SYSTEM_COACH = `你是一位严谨、务实的耐力跑步教练，擅长为业余跑者制定半程马拉松训练计划。
-
-你的计划必须遵守这些硬性规则：
-1. 只依据用户给出的信息安排训练，不虚构用户的伤病、体重、器械或既往训练量。
-2. 每周至少安排 1 天完全休息；每周训练次数不能超过用户勾选的可训练日数量。
-3. 每次训练只能落在用户勾选的星期（比赛日除外）。
-4. 每周跑量相对上一周增幅不超过 8%；比赛前两周逐步减量，比赛周跑量不超过峰值周的 60%。
-5. 训练要具体：每次给出内容、总时长、距离与 1-3 条可以勾选的交付物。
-6. 高强度课（间歇、节奏跑、比赛）不要连续两天安排。
-7. 如果目标成绩与当前水平差距过大，或准备周期不足，在 summary 里直说，但仍要给出当下最合理的计划，不能拒绝出计划。
-8. 中文回答；只输出一个 JSON 对象，不要 Markdown 代码块，不要任何解释文字。`;
-
-  function buildUserPrompt(input) {
-    const weeks = Math.max(1, Math.ceil(daysBetween(input.today, input.raceDate) / 7));
-    const dayText = input.days.slice().sort((a, b) => a - b).map((d) => `周${WEEKDAY_SHORT[d]}`).join('、');
-    return `为下面这位跑者制定训练计划。
-
-【今天】${input.today}
-【目标赛事】${input.goal}
-【比赛日期】${input.raceDate}
-【目标成绩】${input.target}
-【当前最好成绩】${input.current || '未提供'}
-【每周可训练】${dayText}
-【单次最长】${input.maxMinutes} 分钟
-【场地与器械】${input.equipment || '未提供'}
-【伤病与限制】${input.notes || '无'}
-
-计划区间：${input.today} 至 ${input.raceDate}，共约 ${weeks} 周。请从今天之后最近的勾选训练日开始排课。
-
-输出 JSON 结构：
-{
-  "summary": "3-4 句话：整体思路、关键课、最需要注意的风险",
-  "program": {"name": "${input.programName}", "subtitle": "不超过 20 字", "color": "#6F8F6A"},
-  "phases": [
-    {"name": "第一阶段 · 基础", "start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "focus": "一句话"}
-  ],
-  "sessions": [
-    {
-      "date": "YYYY-MM-DD",
-      "type": "easy|long|tempo|interval|strength|cross|race",
-      "content": "不超过 18 个汉字，例如：轻松跑 8km",
-      "minutes": 50,
-      "distanceKm": 8,
-      "deliverables": [
-        {"title": "E 配速完成 8km", "minutes": 40},
-        {"title": "拉伸与记录体感", "minutes": 10}
-      ],
-      "note": "可选，一句提醒"
-    }
-  ]
-}
-
-要求：
-- phases 覆盖整个计划区间，2-4 个阶段，日期连续不重叠。
-- sessions 覆盖每个训练日，不要排休息日；比赛日必须有一条 type=race。
-- 每条 session 的 deliverables 为 1-2 条，minutes 之和等于 session.minutes（允许 ±5 分钟）。
-- 单次 minutes 不超过 ${input.maxMinutes}，distanceKm 与 minutes 匹配。
-- 输出尽量紧凑：不要多余空白、不要重复措辞；focus 与 note 可以为空字符串；summary 不超过 3 句。
-- 所有日期格式为 YYYY-MM-DD。只输出 JSON。`;
-  }
+  const BATCH_WEEKS = 2;
 
   function toInt(value, min, max, fallback) {
     const n = Math.round(Number(value));
@@ -630,7 +577,18 @@
     return session.minutes / 6;
   }
 
-  function validatePlan(plan, input) {
+  // 质量课是否写清了配速或组数
+  function hasPaceDetail(session) {
+    const text = [
+      session.content || '',
+      session.note || '',
+      (session.deliverables || []).map((d) => d && d.title || '').join(' ')
+    ].join(' ');
+    return /配速|@|\d+\s*[×xX*]\s*\d+|\d+['′:：]\d{2}/.test(text);
+  }
+
+  function validatePlan(plan, input, options) {
+    const partial = Boolean(options && options.partial);
     const errors = [];
     const warnings = [];
     const sessions = (plan && plan.sessions) || [];
@@ -667,7 +625,7 @@
       seen[s.date] = true;
     });
 
-    if (!seen[raceDate]) errors.push(`比赛日 ${monthDay(raceDate)} 还没有安排比赛。`);
+    if (!partial && !seen[raceDate]) errors.push(`比赛日 ${monthDay(raceDate)} 还没有安排比赛。`);
 
     // 按周汇总
     const map = {};
@@ -690,11 +648,23 @@
     });
 
     weeks.forEach((w) => {
-      const limit = allowed.length + (w.hasRace && allowed.indexOf(weekday(raceDate)) === -1 ? 1 : 0);
+      const cap = maxSessionsPerWeek(input);
+      const limit = cap + (w.hasRace && allowed.indexOf(weekday(raceDate)) === -1 ? 1 : 0);
       if (w.sessions.length > limit) {
         errors.push(`${w.label} 安排了 ${w.sessions.length} 次训练，超过每周 ${limit} 次的上限。`);
       }
       if (w.sessions.length >= 7) errors.push(`${w.label} 七天都在训练，至少需要留 1 天休息。`);
+
+      if (w.hasRace) return;
+      const longest = w.sessions.reduce((best, s) => (effectiveKm(s) > effectiveKm(best) ? s : best), w.sessions[0]);
+      w.sessions.forEach((s) => {
+        if (s.type === 'long' && s !== longest && effectiveKm(longest) - effectiveKm(s) > 0.5) {
+          warnings.push(`${monthDay(s.date)} 标为长距离，但不是本周最长的一次，建议把最长的一课单独安排。`);
+        }
+        if ((s.type === 'interval' || s.type === 'tempo') && !hasPaceDetail(s)) {
+          warnings.push(`${monthDay(s.date)} 的${s.type === 'interval' ? '间歇' : '节奏'}课没写配速或组数。`);
+        }
+      });
     });
 
     // 跑量增幅（比赛周含比赛距离，单独判断，不参与增幅比较）
@@ -740,6 +710,11 @@
       if (high[sessions[i].type] && high[sessions[i - 1].type]
         && daysBetween(sessions[i - 1].date, sessions[i].date) === 1) {
         warnings.push(`${monthDay(sessions[i - 1].date)} 和 ${monthDay(sessions[i].date)} 连续安排了两节高强度课，注意恢复。`);
+      }
+      const longA = effectiveKm(sessions[i - 1]) >= 14;
+      const longB = effectiveKm(sessions[i]) >= 14;
+      if (longA && longB && daysBetween(sessions[i - 1].date, sessions[i].date) === 1) {
+        warnings.push(`${monthDay(sessions[i - 1].date)} 和 ${monthDay(sessions[i].date)} 连续两天都是长距离，建议错开。`);
       }
     }
 
@@ -793,29 +768,35 @@
     return first <= 5 ? first * 60 + second : first;
   }
 
-  // 把一周的目标跑量分配到具体日期，长距离放在周末
-  function buildSlots(dates, volume, input, hasRace) {
-    const perCap = Math.max(3, Math.floor((input.maxMinutes / 6) * 2) / 2);
-    const raceMinutes = Math.max(45, Math.min(input.maxMinutes, parseTimeToMinutes(input.target) || 110));
-    if (hasRace) {
-      return dates.map((d) => (d === input.raceDate
-        ? { date: d, km: 21.1, minutes: raceMinutes, race: true }
-        : { date: d, km: 4, minutes: 25 }));
-    }
-    let weights;
-    if (dates.length >= 4) weights = [0.18, 0.22, 0.22, 0.38];
-    else if (dates.length === 3) weights = [0.22, 0.28, 0.5];
-    else if (dates.length === 2) weights = [0.4, 0.6];
-    else weights = dates.map(() => 1);
-    const totalWeight = weights.reduce((a, b) => a + b, 0) || 1;
-    return dates.map((d, i) => {
-      const share = (weights[i] || 1) / totalWeight;
-      const km = Math.max(3, Math.min(perCap, Math.round(volume * share * 2) / 2));
-      return { date: d, km, minutes: Math.max(15, Math.round((km * 6) / 5) * 5) };
-    });
+  // 每周最多训练几次：优先用表单里的上限，其次读备注里的「最多四天」，最后按勾选天数
+  const CN_NUM = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
+
+  function noteSessionCap(notes) {
+    const m = /最多[^0-9一二两三四五六]{0,4}([1-6一二两三四五六])\s*(?:天|次)/.exec(String(notes || ''));
+    if (!m) return 0;
+    const ch = m[1];
+    return /[1-6]/.test(ch) ? Number(ch) : (CN_NUM[ch] || 0);
   }
 
-  // 由程序自己算每周目标跑量，模型只负责填当周的课，避免跑量忽高忽低
+  function maxSessionsPerWeek(input) {
+    const allowed = Array.isArray(input.days) ? input.days.length : 0;
+    let cap = Number(input.maxSessions);
+    if (!Number.isFinite(cap) || cap < 1) cap = noteSessionCap(input.notes) || allowed;
+    if (allowed) cap = Math.min(cap, allowed);
+    return Math.max(1, Math.min(6, cap || 1));
+  }
+
+  // 从目标赛事里识别比赛距离，交给模型按对应项目标准安排课量
+  function raceDistanceKm(input) {
+    const text = `${input.goal || ''} ${input.programName || ''}`;
+    if (/全马|全程马拉松|42(\.195)?/.test(text)) return 42.2;
+    if (/半马|半程|21(\.0975)?/.test(text)) return 21.1;
+    if (/10\s*(km|公里)|十公里/.test(text)) return 10;
+    if (/5\s*(km|公里)|五公里/.test(text)) return 5;
+    return 21.1;
+  }
+
+  // 由程序给出每周可选日期与参考跑量，具体课表交给模型安排
   function buildWeekPlan(input) {
     const weeks = [];
     let cursor = mondayOf(input.today);
@@ -824,11 +805,14 @@
       cursor = addDays(cursor, 7);
     }
     const n = weeks.length;
-    const dayCount = Math.max(2, Math.min(input.days.length, 6));
+    const sessionCap = maxSessionsPerWeek(input);
+    const raceDist = raceDistanceKm(input);
     const perSessionKm = Math.max(3, input.maxMinutes / 6);
-    const weeklyCap = Math.max(14, Math.round(perSessionKm * dayCount * 0.9));
+    const weeklyCap = Math.max(14, Math.round(perSessionKm * sessionCap * 0.9));
     const peakIndex = Math.max(0, n - 3);
-    const base = Math.max(10, Math.min(18, weeklyCap));
+    // 参考周跑量随比赛距离变化：全马需要更高基础，5/10km 则更低
+    const perSessionHint = raceDist >= 40 ? 12 : raceDist >= 20 ? 9 : 6;
+    const base = Math.max(20, Math.min(Math.round(sessionCap * perSessionHint), weeklyCap));
     const peakVolume = Math.round(Math.min(base * Math.pow(1.06, peakIndex), weeklyCap));
 
     return weeks.map((start, i) => {
@@ -838,47 +822,50 @@
         return input.days.indexOf(weekday(d)) >= 0 || d === input.raceDate;
       });
       let volume;
-      if (i === n - 1) volume = Math.round(21.1 + (dates.length > 1 ? 5 : 0));
+      if (i === n - 1) volume = Math.round(raceDist + (dates.length > 1 ? 5 : 0));
       else if (i > peakIndex) volume = Math.max(8, Math.round(peakVolume * 0.62));
       else volume = Math.round(Math.min(base * Math.pow(1.06, i), weeklyCap));
-      const hasRace = dates.indexOf(input.raceDate) >= 0;
       return {
         start,
         end,
         dates,
         volume,
-        hasRace,
-        slots: buildSlots(dates, volume, input, hasRace)
+        hasRace: dates.indexOf(input.raceDate) >= 0
       };
     });
   }
 
   function buildChunkPrompt(input, batch, index, total) {
     const weekLines = batch.map((w, i) => {
-      const slotLines = w.slots.map((s) => {
-        const tag = s.race ? '（比赛日）' : '';
-        return `  ${s.date}（周${WEEKDAY_SHORT[weekday(s.date)]}）${s.km}km / ${s.minutes}分钟${tag}`;
-      }).join('\n');
-      const weekTag = w.hasRace ? ' · 比赛周' : (w.volume < 20 ? ' · 减量周' : '');
-      return `第 ${i + 1} 周（${w.start} 至 ${w.end}，共 ${w.volume}km${weekTag}）\n${slotLines}`;
-    }).join('\n\n');
+      const dateLines = w.dates.map((d) => {
+        const tag = d === input.raceDate ? '（比赛日）' : '';
+        return `${d}（周${WEEKDAY_SHORT[weekday(d)]}）${tag}`;
+      }).join('、');
+      const weekTag = w.hasRace ? ' · 比赛周' : '';
+      return `第 ${i + 1} 周（${w.start} 至 ${w.end}${weekTag}）可训练日：${dateLines || '无'}；参考周跑量约 ${w.volume}km`;
+    }).join('\n');
 
-    return `你是跑步教练。下面这份课表的日期、距离、时长已经排好，你只需为每一行补上「训练内容」「训练类型」与「交付物」，不要改动日期、距离和时长。
+    return `你是耐力跑步教练，请为下面的跑者安排这两周的训练，课型、内容、距离和时长都由你决定。
 
-【跑者】目标 ${input.goal}，${input.raceDate} 比赛，目标成绩 ${input.target}，当前最好 ${input.current || '未提供'}
-【限制】单次最长 ${input.maxMinutes} 分钟；场地 ${input.equipment || '未提供'}；伤病 ${input.notes || '无'}
-【本次负责】第 ${index}/${total} 段
+【跑者】目标 ${input.goal}（比赛距离 ${raceDistanceKm(input)}km），${input.raceDate} 比赛，目标成绩 ${input.target}，当前最好 ${input.current || '未提供'}
+【限制】每周最多 ${maxSessionsPerWeek(input)} 次训练；单次最长 ${input.maxMinutes} 分钟；场地 ${input.equipment || '未提供'}；伤病与备注：${input.notes || '无'}
+【本次负责】整份计划的第 ${index}/${total} 周，只排这两周
 
 ${weekLines}
 
-每行的填写要求：
-- content：不超过 18 个汉字的训练名称，例如「轻松跑 6km」「节奏跑 3×1km」「长距离 14km」「核心与拉伸」。
-- type：从 easy、long、tempo、interval、strength、cross、race 中选一个；10km 以上的长距离用 long，比赛日用 race。
-- deliverables：1-2 条可以打勾的完成项，每条给分钟数，合计等于该行的分钟数。
-- 不要输出思考过程，不要解释，直接给结果。
+要求：
+1. 只能从当周列出的可训练日里选日期，每个日期最多 1 次训练；每周不超过 ${maxSessionsPerWeek(input)} 次，且至少留 1 天完全休息。
+2. 课型要有变化，不要全是轻松跑：每周安排 1 次长距离（尽量放在周末）、1 次质量课（节奏跑或间歇跑），其余为轻松跑、力量或交叉训练；减量与比赛周降低强度。
+3. 课量按这个比赛距离的专业备赛标准判断，不要套用固定数字：不同比赛距离的长距离与日常课量差别很大（全马与半马的长距离标准并不同），由你决定什么算长距离、轻松跑该跑多远，并在 summary 里说明你的判断依据。
+4. 质量课必须在 content 或 deliverables 里写清配速或组数，例如「间歇 6×800m @4:40/km」「节奏跑 2×2km @5:10/km」，不能只写「间歇跑」。
+5. 比赛日必须有 type=race 的一条，content 写比赛日的项目名称，并给出目标配速与赛后恢复的交付物。
+6. distanceKm 与 minutes 要和课型匹配（力量课可以 distanceKm=0）；单次 minutes 不得超过 ${input.maxMinutes}。若该项目的标准课量超过这个上限，按上限安排并在 summary 中说明取舍。
+7. 每周总跑量相对上一周增幅不超过 8%（第一周不必受限），参考周跑量已给出，尽量接近。
+8. content 不超过 18 个汉字；deliverables 1-2 条，每条给分钟数，合计等于该次 minutes。
+先想清楚再答，但不要输出思考过程，只输出结果。
 
-只输出 JSON（sessions 的 date 必须与上面每一行一致）：
-{"summary":"一句话说明本段重点","sessions":[{"date":"YYYY-MM-DD","type":"easy","content":"不超过18字","deliverables":[{"title":"完成 6km","minutes":30},{"title":"拉伸放松","minutes":10}]}]}`;
+只输出 JSON：
+{"summary":"一句话说明这两周的安排思路","sessions":[{"date":"YYYY-MM-DD","type":"easy|long|tempo|interval|strength|cross|race","content":"不超过18字","minutes":50,"distanceKm":8,"deliverables":[{"title":"完成 8km","minutes":40},{"title":"拉伸放松","minutes":10}]}]}`;
   }
 
   function buildPhases(weekPlan, input) {
@@ -903,14 +890,15 @@ ${weekLines}
 
   function defaultRaceSession(input) {
     const targetMinutes = parseTimeToMinutes(input.target);
-    const minutes = Math.max(60, Math.min(input.maxMinutes, targetMinutes > 45 ? targetMinutes : 110));
+    const raceDist = raceDistanceKm(input);
+    const minutes = Math.max(30, Math.min(400, targetMinutes || Math.round(raceDist * 6.5)));
     const runPart = Math.max(20, minutes - 10);
     return {
       date: input.raceDate,
       type: 'race',
-      content: '比赛日 · 半马',
+      content: `比赛日 · ${String(input.goal || '比赛').replace(/目标|计划/g, '').trim().slice(0, 8)}`,
       minutes,
-      distanceKm: 21.1,
+      distanceKm: raceDistanceKm(input),
       note: '按目标配速执行，前程保守',
       deliverables: normalizeDeliverables([
         { title: '按目标配速完成比赛', minutes: runPart },
@@ -919,123 +907,90 @@ ${weekLines}
     };
   }
 
-  async function generatePlanChunked(input, notify) {
+  // 只生成指定的若干周（默认 2 周），一次请求，控制 token 消耗
+  async function generateBatch(input, fromIndex, onStage) {
+    const notify = typeof onStage === 'function' ? onStage : function () {};
     const weekPlan = buildWeekPlan(input);
     if (!weekPlan.length) throw new Error('比赛日期太近，无法排出训练周。');
-    const batchSize = 2;
-    const batches = [];
-    for (let i = 0; i < weekPlan.length; i += batchSize) batches.push(weekPlan.slice(i, i + batchSize));
 
-    const textByDate = {};
-    const failedChunks = [];
-    let summary = '';
+    const start = Math.max(0, Math.min(Number(fromIndex) || 0, weekPlan.length));
+    const batch = weekPlan.slice(start, start + BATCH_WEEKS);
+    if (!batch.length) throw new Error('这份计划的周次已经排完了。');
 
-    for (let b = 0; b < batches.length; b += 1) {
-      notify({ stage: 'chunk', index: b + 1, total: batches.length });
-      const prompt = buildChunkPrompt(input, batches[b], b + 1, batches.length);
-      let raw = null;
-      let lastError = null;
-      for (let attempt = 0; attempt < 2 && !raw; attempt += 1) {
-        try {
-          raw = await chatJSON({
-            system: SYSTEM_COACH_CHUNK,
-            user: prompt,
-            maxTokens: 3000,
-            temperature: 0.3
-          });
-        } catch (err) {
-          lastError = err;
-          if (!err || (err.kind !== 'empty' && err.kind !== 'network' && err.kind !== 'timeout')) throw err;
-        }
+    notify({ stage: 'batch', index: start + batch.length, total: weekPlan.length });
+    const prompt = buildChunkPrompt(input, batch, start + 1, weekPlan.length);
+
+    let raw = null;
+    let lastError = null;
+    for (let attempt = 0; attempt < 2 && !raw; attempt += 1) {
+      try {
+        raw = await chatJSON({
+          system: SYSTEM_COACH_CHUNK,
+          user: prompt,
+          maxTokens: 1500,
+          lowBudget: true,
+          temperature: 0.3
+        });
+      } catch (err) {
+        lastError = err;
+        if (!err || (err.kind !== 'empty' && err.kind !== 'network' && err.kind !== 'timeout')) throw err;
       }
-      if (!raw) {
-        // 该段没有拿到文字，但日期与跑量骨架已经排好，先用默认名称填充，不中断整份计划
-        failedChunks.push(b + 1);
-        continue;
-      }
-      if (!summary) summary = String(raw.summary || '').trim();
+    }
+
+    const allowed = {};
+    batch.forEach((w) => w.dates.forEach((d) => { allowed[d] = true; }));
+
+    // 采用模型给出的课表，只保留本段合法的日期
+    const sessions = [];
+    if (raw) {
       const list = Array.isArray(raw.sessions) ? raw.sessions : [];
       list.forEach((s) => {
         if (!s || typeof s !== 'object') return;
         const date = normalizeDate(s.date);
-        if (!date) return;
-        textByDate[date] = s;
-      });
-    }
-
-    // 结构以程序排好的骨架为准，模型只补充文字
-    const sessions = [];
-    weekPlan.forEach((week) => {
-      week.slots.forEach((slot) => {
-        const filled = textByDate[slot.date] || {};
-        const fallbackRace = slot.race ? defaultRaceSession(input) : null;
-        const content = String(filled.content || '').trim().slice(0, 30)
-          || (fallbackRace ? fallbackRace.content : slot.km >= 10 ? `长距离 ${slot.km}km` : `轻松跑 ${slot.km}km`);
-        let type = normalizeType(filled.type);
-        if (slot.race) type = 'race';
-        else if (type === 'race') type = 'easy';
-        else if (slot.km >= 12 && type === 'easy') type = 'long';
-        const deliverables = Array.isArray(filled.deliverables) && filled.deliverables.length
-          ? filled.deliverables
-          : fallbackRace ? fallbackRace.deliverables : [{ title: `完成 ${slot.km}km`, minutes: Math.max(5, slot.minutes - 10) }, { title: '拉伸与记录体感', minutes: 10 }];
+        if (!date || !allowed[date]) return;
+        if (sessions.some((x) => x.date === date)) return;
         sessions.push({
-          date: slot.date,
-          type,
-          content,
-          minutes: slot.minutes,
-          distanceKm: slot.km,
-          note: '',
-          deliverables
+          date,
+          type: normalizeType(s.type),
+          content: String(s.content || '').trim(),
+          minutes: Number(s.minutes) || 0,
+          distanceKm: Number(s.distanceKm) || 0,
+          note: String(s.note || '').trim(),
+          deliverables: Array.isArray(s.deliverables) ? s.deliverables : []
         });
       });
-    });
-
-    if (failedChunks.length === batches.length) {
-      throw new Error('模型一直没有返回可用内容。可以稍后重试，或在设置里换用非思考型的对话模型。');
+    }
+    if (!sessions.length) {
+      const detail = String((lastError && lastError.message) || '模型没有返回可用的训练安排').replace(/[。.\s]+$/, '');
+      throw new Error(`${detail}。可以稍后重试，或把每周次数调低一点。`);
     }
 
-    const raw = {
-      summary: summary || `共 ${weekPlan.length} 周，按基础、强化、减量三段推进，赛前两周减量。`,
+    // 比赛日落在本段却没排比赛时补上（比赛本身是既定日程，不是训练安排）
+    const raceInBatch = batch.some((w) => w.dates.indexOf(input.raceDate) >= 0);
+    if (raceInBatch && !sessions.some((s) => s.date === input.raceDate)) {
+      sessions.push(defaultRaceSession(input));
+    }
+    sessions.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+    const rawPlan = {
+      summary: String((raw && raw.summary) || '').trim(),
       program: { name: input.programName, subtitle: `目标 ${input.target}`, color: '#6F8F6A' },
       phases: buildPhases(weekPlan, input),
       sessions
     };
-    return { plan: normalizePlan(raw, input), failedChunks };
-  }
-
-  async function generatePlan(input, onStage) {
-    const notify = typeof onStage === 'function' ? onStage : function () {};
-    let singleError = null;
-    try {
-      notify({ stage: 'single' });
-      const raw = await chatJSON({
-        system: SYSTEM_COACH,
-        user: buildUserPrompt(input),
-        maxTokens: 6000,
-        temperature: 0.35
-      });
-      const plan = normalizePlan(raw, input);
-      return { plan, validation: validatePlan(plan, input), mode: 'single' };
-    } catch (err) {
-      singleError = err;
-      const recoverable = err && (
-        err.kind === 'empty' || err.kind === 'network' || err.kind === 'timeout'
-        || /截断|为空|没有返回可用的训练安排/.test(String(err.message || ''))
-      );
-      if (!recoverable) throw err;
-    }
-
-    let chunked;
-    try {
-      chunked = await generatePlanChunked(input, notify);
-    } catch (err) {
-      throw new Error(`${(err && err.message) || '分段生成失败'}（单次生成也失败：${(singleError && singleError.message) || '未知原因'}）`);
-    }
+    const plan = normalizePlan(rawPlan, input);
     return {
-      plan: chunked.plan,
-      validation: validatePlan(chunked.plan, input),
-      mode: 'chunked',
-      failedChunks: chunked.failedChunks
+      plan,
+      validation: validatePlan(plan, input, { partial: true }),
+      degraded: false,
+      error: '',
+      batch: {
+        from: start,
+        to: start + batch.length,
+        total: weekPlan.length,
+        firstDate: sessions.length ? sessions[0].date : '',
+        lastDate: sessions.length ? sessions[sessions.length - 1].date : ''
+      }
     };
   }
 
@@ -1047,14 +1002,20 @@ ${weekLines}
   window.LifeLogAI = {
     SETTINGS_KEY,
     VERSION: AI_VERSION,
+    BATCH_WEEKS,
     DEFAULT_SETTINGS,
     MODEL_PRESETS,
     loadSettings,
     saveSettings,
     hasApiKey,
     testConnection,
-    generatePlan,
+    generateBatch,
     validatePlan,
     minutesToUnits
   };
 })();
+
+
+
+
+
