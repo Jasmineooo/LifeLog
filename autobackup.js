@@ -121,7 +121,10 @@
         a.remove();
       }, 2000);
 
-      try { localStorage.setItem(MARK, String(Date.now())); } catch (e) {}
+      try {
+        localStorage.setItem(MARK, String(Date.now()));
+        localStorage.setItem('__lastBackupAt', String(Date.now()));
+      } catch (e) {}
     }).catch(function () {
       /* 读取失败时不记录时间，下次打开重试 */
     });

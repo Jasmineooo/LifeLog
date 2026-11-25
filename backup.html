@@ -115,6 +115,9 @@
   }
   .toast.show { opacity: 1; transform: translate(-50%, 0); }
   .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }
+  .last { font-size: 14px; }
+  .last b { font-variant-numeric: tabular-nums; }
+  .last .warn { color: #f5a623; }
 </style>
 </head>
 <body>
@@ -128,6 +131,11 @@
       <div class="stat"><b id="size">0 B</b><span>占用大小</span></div>
       <div class="stat"><b id="idbCount">–</b><span>本地数据库</span></div>
     </div>
+  </div>
+
+  <div class="card">
+    <div class="last">最近备份：<b id="lastTime">还没有备份记录</b></div>
+    <p class="hint" id="lastHint">建议每周备份一次，并把文件保存到电脑或网盘。</p>
   </div>
 
   <div class="card">
@@ -433,6 +441,30 @@
     }).catch(function () { $('idbCount').textContent = '?'; });
   }
 
+  function renderStatus() {
+    var lastManual = Number(localStorage.getItem('__lastBackupAt')) || 0;
+    var lastAuto = Number(localStorage.getItem('__autoBackupAt')) || 0;
+    var last = Math.max(lastManual, lastAuto);
+    var timeEl = $('lastTime');
+    var hintEl = $('lastHint');
+    if (!last) {
+      timeEl.textContent = '还没有备份记录';
+      timeEl.className = 'warn';
+      hintEl.textContent = '建议现在先点一次「一键备份全部数据」，把文件保存到电脑或网盘。';
+      return;
+    }
+    var days = Math.floor((Date.now() - last) / 86400000);
+    var d = new Date(last);
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    var label = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    timeEl.textContent = label + (days <= 0 ? '（今天）' : '（' + days + ' 天前）');
+    timeEl.className = days > 7 ? 'warn' : '';
+    hintEl.textContent = days > 7
+      ? '已超过 7 天没有备份，建议现在补一次，避免换机或清理浏览器数据时丢失。'
+      : '建议每周备份一次，并把文件保存到电脑或网盘。';
+  }
+
   $('btnBackup').addEventListener('click', function () {
     var btn = $('btnBackup');
     btn.disabled = true;
@@ -442,6 +474,8 @@
       if (!payload.count && !Object.keys(idb).length) return toast('当前没有可备份的数据');
       var text = JSON.stringify(payload, null, 2);
       download(text, 'all-backup-' + stamp() + '.json');
+      try { localStorage.setItem('__lastBackupAt', String(Date.now())); } catch (e) {}
+      renderStatus();
       toast('已导出 ' + payload.count + ' 项，' + fmt(byteSize(text)));
     }).catch(function (e) {
       toast('备份失败：' + (e && e.message ? e.message : e));
@@ -513,6 +547,7 @@
 
   render();
   refreshIdbCount();
+  renderStatus();
 })();
 </script>
 </body>

@@ -11,6 +11,61 @@
   const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
   const WEEKDAY_SHORT = { 0: '日', 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六' };
 
+  // 数据保护：读取异常时保留原始副本，并拒绝写入，避免覆盖既有数据
+  const DataGuard = (function () {
+    const blocked = {};
+    let bannerShown = false;
+
+    function rescue(key, raw) {
+      try {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        localStorage.setItem('__rescue.' + key + '.' + stamp, raw);
+      } catch (err) { /* 存储已满时忽略，仍不覆盖原数据 */ }
+    }
+
+    function paintBanner() {
+      if (document.getElementById('__data_guard_banner')) return;
+      const el = document.createElement('div');
+      el.id = '__data_guard_banner';
+      el.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483647;background:#8f1d1d;' +
+        'color:#fff;font:13px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;' +
+        'padding:10px 14px;box-shadow:0 2px 10px rgba(0,0,0,.35)';
+      el.textContent = '数据读取异常：原始数据已另存副本，本次不会写入。请到「数据备份中心」恢复后再使用。';
+      document.body.appendChild(el);
+    }
+
+    function showBanner() {
+      if (bannerShown) return;
+      bannerShown = true;
+      if (document.body) paintBanner();
+      else document.addEventListener('DOMContentLoaded', paintBanner);
+    }
+
+    function markBroken(key, raw) {
+      rescue(key, raw);
+      blocked[key] = true;
+      showBanner();
+    }
+
+    function read(key) {
+      let raw = null;
+      try { raw = localStorage.getItem(key); } catch (err) { return { ok: true, raw: null, value: null }; }
+      if (raw === null) return { ok: true, raw: null, value: null };
+      try {
+        return { ok: true, raw: raw, value: JSON.parse(raw) };
+      } catch (err) {
+        markBroken(key, raw);
+        return { ok: false, raw: raw, value: null };
+      }
+    }
+
+    return {
+      read: read,
+      markBroken: markBroken,
+      canWrite: function (key) { return !blocked[key]; }
+    };
+  })();
+
   const COMPLETION_OPTIONS = [
     { value: 0, label: '未完成', short: '未完成' },
     { value: 0.5, label: '完成 50%', short: '50%' },
@@ -484,7 +539,7 @@
     }, extras || {});
   }
 
-  function createSeedState() {
+  function createSeedState(withDemo) {
     const today = todayStr();
     const monday = startOfWeek(today);
     const prev = addDays(monday, -7);
@@ -503,6 +558,11 @@
         demoEntryIds: []
       }
     };
+
+    if (withDemo === false) {
+      state.meta.demo = false;
+      return state;
+    }
 
     const add = (programId, dateOffset, content, deliverables, extras) => {
       const entry = buildEntry(state, programId, addDays(prev, dateOffset), content, deliverables, extras);
@@ -619,23 +679,24 @@
   }
 
   function loadState() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        const seeded = createSeedState();
-        saveState(seeded);
-        return seeded;
-      }
-      const parsed = JSON.parse(raw);
-      const normalized = normalizeState(parsed);
-      return normalized || createSeedState();
-    } catch (err) {
-      console.warn('LifeLog: failed to load local data', err);
-      return createSeedState();
+    const read = DataGuard.read(STORAGE_KEY);
+    if (!read.ok) return createSeedState(false);
+    if (read.value === null) {
+      const seeded = createSeedState();
+      saveState(seeded);
+      return seeded;
     }
+    const normalized = normalizeState(read.value);
+    if (!normalized) {
+      // 结构异常：保留原始数据，不做任何覆盖
+      DataGuard.markBroken(STORAGE_KEY, read.raw);
+      return createSeedState(false);
+    }
+    return normalized;
   }
 
   function saveState(state) {
+    if (!DataGuard.canWrite(STORAGE_KEY)) return false;
     try {
       state.meta = state.meta || {};
       state.meta.updatedAt = new Date().toISOString();
@@ -648,6 +709,7 @@
   }
 
   function makeBackup(state, label) {
+    if (!DataGuard.canWrite(STORAGE_KEY)) return null;
     try {
       const raw = localStorage.getItem(BACKUP_KEY);
       const backups = raw ? JSON.parse(raw) : [];
