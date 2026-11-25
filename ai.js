@@ -8,7 +8,7 @@
   'use strict';
 
   const SETTINGS_KEY = 'ai.settings.v1';
-  const AI_VERSION = 'v11';
+  const AI_VERSION = 'v12';
   const DEFAULT_SETTINGS = { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: '' };
   const MODEL_PRESETS = [
     { id: 'deepseek-flash', name: 'DeepSeek Flash（快、便宜）', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' },
@@ -313,7 +313,7 @@
     }
     if (!content) throw emptyContentError({ finish_reason: finish }, reasoning);
     if (finish === 'length') {
-      throw taggedError('模型输出被截断：计划太长，超出了本次生成上限，正在改用分段生成。', 'empty');
+      throw taggedError('模型输出被截断：本次额度用完了（含思考过程）。', 'empty');
     }
     return content;
   }
@@ -736,9 +736,9 @@
     };
   }
 
-  /* ---------------- 分段生成：单次生成失败时自动启用 ---------------- */
+  /* ---------------- 每次只排两周，控制 token ---------------- */
 
-  const SYSTEM_COACH_CHUNK = `你是严谨的耐力跑步教练，正在为业余跑者分段制定半程马拉松训练计划。
+  const SYSTEM_COACH_CHUNK = `你是严谨的耐力跑步教练，为业余跑者按比赛项目制定训练计划。
 只依据给出的信息安排，不虚构伤病或器械；只输出一个 JSON 对象，不要 Markdown，不要解释。`;
 
   function eachDate(start, end, limit) {
@@ -927,7 +927,7 @@ ${weekLines}
         raw = await chatJSON({
           system: SYSTEM_COACH_CHUNK,
           user: prompt,
-          maxTokens: 1500,
+          maxTokens: 2600,
           lowBudget: true,
           temperature: 0.3
         });
@@ -962,7 +962,8 @@ ${weekLines}
     }
     if (!sessions.length) {
       const detail = String((lastError && lastError.message) || '模型没有返回可用的训练安排').replace(/[。.\s]+$/, '');
-      throw new Error(`${detail}。可以稍后重试，或把每周次数调低一点。`);
+      const hint = /截断|额度/.test(detail) ? '可以把每周次数调少一些再试。' : '可以稍后重试，或把每周次数调低一点。';
+      throw new Error(`${detail}。${hint}`);
     }
 
     // 比赛日落在本段却没排比赛时补上（比赛本身是既定日程，不是训练安排）
@@ -1014,6 +1015,7 @@ ${weekLines}
     minutesToUnits
   };
 })();
+
 
 
 
