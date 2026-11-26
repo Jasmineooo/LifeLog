@@ -842,6 +842,65 @@
     return out;
   }
 
+  function financeStatus(today) {
+    var card = baseCard('FinanceLog', 'FinanceLog', '资', '#2E8B6A');
+    var out = { card: card, reminders: [] };
+    var r = readJSON('finance.v1');
+    if (!r.ok) {
+      card.tone = 'bad'; card.cap = '数据读取异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'FinanceLog 数据读取异常，先不要在该应用里保存，请用下方备份恢复。', app: 'FinanceLog' });
+      return out;
+    }
+    var st = r.value;
+    if (!st) { card.cap = '还没有持仓'; card.detail = '打开应用上传持仓截图'; return out; }
+    if (!Array.isArray(st.positions) || !Array.isArray(st.accounts)) {
+      card.tone = 'bad'; card.cap = '数据结构异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'FinanceLog 数据结构异常，先不要在该应用里保存，请用下方备份恢复。', app: 'FinanceLog' });
+      return out;
+    }
+
+    var SCALE = 10000;
+    function mv(p) {
+      if (p.type === 'cash') return Number(p.quantity) || 0;
+      var mult = p.type === 'option' ? (Number(p.option && p.option.multiplier) || 10000) : 1;
+      // 期权卖方是负债，按负数计入
+      var sign = (p.type === 'option' && p.option && p.option.direction === 'short') ? -1 : 1;
+      return sign * (Number(p.quantity) || 0) * (Number(p.currentPrice) || 0) * mult / SCALE;
+    }
+
+    var total = 0;
+    var count = 0;
+    var stale = 0;
+    st.positions.forEach(function (p) {
+      if (!p) return;
+      total += mv(p);
+      if (p.type === 'cash') return;
+      count += 1;
+      var d = String(p.updatedAt || '').slice(0, 10);
+      if (!d || dayDiff(d, today) >= 7) stale += 1;
+    });
+
+    var day = 0;
+    var hasDay = false;
+    st.accounts.forEach(function (a) {
+      if (!a) return;
+      if (typeof a.dayPnl === 'number' && isFinite(a.dayPnl)) { day += a.dayPnl; hasDay = true; }
+    });
+
+    card.value = '¥' + money(Math.round(total * 100));
+    card.cap = count ? '总资产 · ' + count + ' 个持仓' : '还没有持仓';
+    card.detail = hasDay
+      ? '今日 ' + (day >= 0 ? '+' : '-') + '¥' + money(Math.abs(Math.round(day * 100)))
+      : (count ? '今日盈亏未录入' : '打开应用录入持仓');
+    card.active = hasDay || count > 0;
+
+    if (stale) {
+      card.tone = 'warn';
+      out.reminders.push({ tone: 'info', text: 'FinanceLog 有 ' + stale + ' 个持仓超过 7 天没更新价格。', app: 'FinanceLog' });
+    }
+    return out;
+  }
+
   function renderHero() {
     var p = bjParts();
     var date = p.y + '-' + p.m + '-' + p.d;
@@ -855,7 +914,7 @@
     var today = p.y + '-' + p.m + '-' + p.d;
     renderHero();
 
-    var results = [lifeStatus(today, p.h), timeStatus(today, p.h), spendStatus(today, p.h), techStatus(today), tradeStatus(today)];
+    var results = [lifeStatus(today, p.h), timeStatus(today, p.h), spendStatus(today, p.h), techStatus(today), tradeStatus(today), financeStatus(today)];
     var cards = results.map(function (x) { return x.card; });
     var reminders = [];
     results.forEach(function (x) { reminders = reminders.concat(x.reminders); });
