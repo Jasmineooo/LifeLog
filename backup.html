@@ -886,18 +886,40 @@
 
     var day = 0;
     var hasDay = false;
+    var dayAsOf = '';
     st.accounts.forEach(function (a) {
       if (!a) return;
-      if (typeof a.dayPnl === 'number' && isFinite(a.dayPnl)) { day += a.dayPnl; hasDay = true; }
+      if (typeof a.dayPnl === 'number' && isFinite(a.dayPnl)) {
+        day += a.dayPnl;
+        hasDay = true;
+        var d = String(a.dayPnlAsOf || '').slice(0, 10);
+        if (d > dayAsOf) dayAsOf = d;
+      }
     });
+
+    // 盈亏可能是几天前录的，别把旧数字说成“今日”
+    var dayWord = '今日';
+    if (hasDay && dayAsOf && dayAsOf !== today) {
+      dayWord = dayDiff(dayAsOf, today) === 1 ? '昨日' : dayAsOf.slice(5) + ' 当日';
+    }
 
     // 金额不在工作台上显示，避免截图或旁人一眼看到家底
     card.value = '***';
     card.cap = count ? '总资产 · ' + count + ' 个持仓' : '还没有持仓';
     card.detail = hasDay
-      ? '今日 ' + (day >= 0 ? '+' : '-') + '¥' + money(Math.abs(Math.round(day * 100)))
+      ? dayWord + ' ' + (day >= 0 ? '+' : '-') + '¥' + money(Math.abs(Math.round(day * 100))) +
+        (dayWord === '今日' ? '' : ' · 未更新')
       : (count ? '今日盈亏未录入' : '打开应用录入持仓');
     card.active = hasDay || count > 0;
+
+    if (hasDay && dayAsOf && dayAsOf !== today) {
+      card.tone = 'warn';
+      out.reminders.push({
+        tone: 'warn',
+        text: 'FinanceLog 的盈亏还是 ' + dayAsOf.slice(5) + ' 的数字，今天还没更新持仓。',
+        app: 'FinanceLog'
+      });
+    }
 
     // 风控：快照由 FinanceLog 写入时算好，这里只读
     var rs = st.meta && st.meta.risk;
