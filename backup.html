@@ -692,7 +692,9 @@
     var logs = r.value;
     var done = logs.filter(function (l) { return l && l.date === today && l.status === 'done'; });
     var plans = logs.filter(function (l) { return l && l.date === today && l.status === 'plan'; });
-    var hours = done.reduce(function (sum, l) { return sum + (Number(l.duration) || 0); }, 0);
+    // duration 以半小时为单位，TimeLog 里显示时同样是 ×0.5
+    var units = done.reduce(function (sum, l) { return sum + (Number(l.duration) || 0); }, 0);
+    var hours = units * 0.5;
 
     var recent = null;
     logs.forEach(function (l) {
@@ -707,7 +709,7 @@
       card.cap = '今日无记录';
       card.detail = recent ? '最近 ' + shortDate(recent.date) + ' · ' + String(recent.task || '') : '还没有工作记录';
     } else {
-      card.value = done.length ? hours + 'h' : '—';
+      card.value = done.length ? (Math.round(hours * 10) / 10) + 'h' : '—';
       card.cap = done.length ? '今日 ' + done.length + ' 条记录' : '今天还没记录工时';
       card.detail = (plans.length ? plans.length + ' 项计划待完成' : '今日计划已全部完成') +
         (recent && recent.date !== today ? ' · 最近 ' + shortDate(recent.date) : '');
@@ -843,7 +845,7 @@
   }
 
   function financeStatus(today) {
-    var card = baseCard('FinanceLog', 'FinanceLog', '资', '#2E8B6A');
+    var card = baseCard('FinanceLog', 'FinanceLog', '资', '#B03A32');
     var out = { card: card, reminders: [] };
     var r = readJSON('finance.v1');
     if (!r.ok) {
@@ -861,6 +863,8 @@
 
     var SCALE = 10000;
     function mv(p) {
+      // 金额制（基金平台截图）：currentPrice 直接是金额
+      if (p.mode === 'amount') return (Number(p.currentPrice) || 0) / SCALE;
       if (p.type === 'cash') return Number(p.quantity) || 0;
       var mult = p.type === 'option' ? (Number(p.option && p.option.multiplier) || 10000) : 1;
       // 期权卖方是负债，按负数计入
@@ -887,12 +891,29 @@
       if (typeof a.dayPnl === 'number' && isFinite(a.dayPnl)) { day += a.dayPnl; hasDay = true; }
     });
 
-    card.value = '¥' + money(Math.round(total * 100));
+    // 金额不在工作台上显示，避免截图或旁人一眼看到家底
+    card.value = '***';
     card.cap = count ? '总资产 · ' + count + ' 个持仓' : '还没有持仓';
     card.detail = hasDay
       ? '今日 ' + (day >= 0 ? '+' : '-') + '¥' + money(Math.abs(Math.round(day * 100)))
       : (count ? '今日盈亏未录入' : '打开应用录入持仓');
     card.active = hasDay || count > 0;
+
+    // 风控：快照由 FinanceLog 写入时算好，这里只读
+    var rs = st.meta && st.meta.risk;
+    if (rs && rs.warn) {
+      out.reminders.push({ tone: 'warn', text: 'FinanceLog 风控：' + rs.warn + '。', app: 'FinanceLog' });
+    }
+    if (rs && rs.maxName && rs.maxPct) {
+      var conc = (st.settings && st.settings.risk && Number(st.settings.risk.concentration)) || 25;
+      if (rs.maxPct > conc) {
+        out.reminders.push({
+          tone: 'info',
+          text: 'FinanceLog「' + rs.maxName + '」占总资产 ' + rs.maxPct + '%，超过集中度阈值 ' + conc + '%。',
+          app: 'FinanceLog'
+        });
+      }
+    }
 
     if (stale) {
       card.tone = 'warn';
