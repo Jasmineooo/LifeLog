@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>数据备份中心</title>
+<title>我的工作台</title>
 <link rel="icon" type="image/png" href="icons/backup-icon.png">
 <link rel="apple-touch-icon" href="icons/backup-icon-180.png">
-<meta name="apple-mobile-web-app-title" content="备份">
+<meta name="apple-mobile-web-app-title" content="工作台">
 <meta name="theme-color" content="#0d1117">
 <style>
   :root {
@@ -118,12 +118,96 @@
   .last { font-size: 14px; }
   .last b { font-variant-numeric: tabular-nums; }
   .last .warn { color: #f5a623; }
+
+  /* ---------- 今日工作台 ---------- */
+  .hello { font-size: 22px; font-weight: 700; letter-spacing: .3px; }
+  .dateline { color: var(--muted); font-size: 13px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .herohint { margin-top: 10px; font-size: 13px; color: #c3cde0; }
+  .herohint b { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .apps { padding: 15px 14px 14px; }
+  .cardhead {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 10px; font-size: 12.5px; color: var(--muted); margin: 0 2px 10px;
+  }
+  .cardhead b { font-size: 14px; color: var(--text); font-weight: 600; }
+  .appgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .app {
+    display: block;
+    min-width: 0;
+    text-decoration: none;
+    color: inherit;
+    background: #12151c;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 12px 11px;
+    transition: border-color .18s ease, transform .12s ease;
+  }
+  .app:active { transform: scale(.985); border-color: #39415a; }
+  .app.wide { grid-column: 1 / -1; }
+  .app .top { display: flex; align-items: center; gap: 7px; }
+  .app .ico {
+    width: 22px; height: 22px; border-radius: 7px; flex: 0 0 22px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+  }
+  .app .an {
+    flex: 1; min-width: 0; font-size: 13px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .app .go { color: #5a6480; font-size: 15px; line-height: 1; }
+  .app .av {
+    margin-top: 9px; font-size: clamp(19px, 5.6vw, 23px); font-weight: 700;
+    line-height: 1.15; font-variant-numeric: tabular-nums;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .app .av.muted { color: var(--muted); font-size: 16px; font-weight: 500; }
+  .app .ac { color: var(--muted); font-size: 11.5px; margin-top: 1px; }
+  .app .ad {
+    color: #9aa4ba; font-size: 12px; margin-top: 7px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .app.warn { border-color: #4a3d24; }
+  .app.warn .av { color: #f0b95a; }
+  .app.bad { border-color: #5a2a2e; }
+  .app.bad .an, .app.bad .av { color: #ff8b8b; }
+  .ritem {
+    display: flex; gap: 9px; align-items: flex-start;
+    padding: 9px 0; border-top: 1px solid var(--line); font-size: 13px;
+  }
+  .ritem:first-child { border-top: 0; padding-top: 2px; }
+  .ritem .dot {
+    flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%;
+    margin-top: 7px; background: var(--accent); display: block;
+  }
+  .ritem.warn .dot { background: #f5a623; }
+  .ritem.danger .dot { background: #ff5d5d; }
+  .ritem span { flex: 1; min-width: 0; }
+  .ritem a { flex: 0 0 auto; color: var(--accent); text-decoration: none; font-size: 12.5px; }
+  .sechead { font-size: 12.5px; color: var(--muted); margin: 22px 4px 8px; font-weight: 500; letter-spacing: .4px; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>数据备份中心</h1>
+  <h1>我的工作台</h1>
   <div class="sub" id="origin"></div>
+
+  <div class="card">
+    <div class="hello" id="hello">你好</div>
+    <div class="dateline" id="dateline">北京时间</div>
+    <div class="herohint" id="heroHint"></div>
+  </div>
+
+  <div class="card apps">
+    <div class="cardhead"><b>今日状态</b><span id="appsHint"></span></div>
+    <div class="appgrid" id="appGrid"></div>
+  </div>
+
+  <div class="card">
+    <div class="cardhead"><b>提醒</b><span id="reminderHint"></span></div>
+    <ul id="reminderList"></ul>
+  </div>
+
+  <h2 class="sechead">数据备份</h2>
 
   <div class="card">
     <div class="stats">
@@ -197,6 +281,89 @@
   var $ = function (id) { return document.getElementById(id); };
   var toastTimer = null;
 
+  /* ---------------- 北京时间工具 ---------------- */
+  // 页面上的日期与时间一律按北京时间显示，不受设备时区影响
+  var TZ = 'Asia/Shanghai';
+
+  function pad2(n) { return String(n).padStart(2, '0'); }
+
+  function bjParts(date) {
+    var d = date instanceof Date ? date : new Date(date || Date.now());
+    try {
+      var parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+      }).formatToParts(d);
+      var get = function (t) {
+        var hit = parts.find(function (x) { return x.type === t; });
+        return hit ? hit.value : '';
+      };
+      return { y: get('year'), m: get('month'), d: get('day'), h: Number(get('hour')) || 0, min: get('minute') };
+    } catch (e) {
+      return { y: String(d.getFullYear()), m: pad2(d.getMonth() + 1), d: pad2(d.getDate()), h: d.getHours(), min: pad2(d.getMinutes()) };
+    }
+  }
+
+  function bjToday() { var p = bjParts(); return p.y + '-' + p.m + '-' + p.d; }
+  function bjDateStr(ts) { var p = bjParts(ts); return p.y + '-' + p.m + '-' + p.d; }
+  function bjFull(ts) {
+    var p = bjParts(ts);
+    return p.y + '-' + p.m + '-' + p.d + ' ' + pad2(p.h) + ':' + p.min;
+  }
+
+  function dayDiff(from, to) {
+    if (!from || !to) return 0;
+    var a = Date.parse(from + 'T00:00:00Z');
+    var b = Date.parse(to + 'T00:00:00Z');
+    if (isNaN(a) || isNaN(b)) return 0;
+    return Math.round((b - a) / 86400000);
+  }
+
+  var CN_WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  function weekdayCN(dateStr) {
+    var p = String(dateStr).split('-').map(Number);
+    var d = new Date(p[0], p[1] - 1, p[2], 12);
+    return CN_WEEK[d.getDay()] || '';
+  }
+
+  function shortDate(dateStr) { return String(dateStr || '').slice(5); }
+
+  function money(cents) {
+    var v = Math.round(Number(cents) || 0) / 100;
+    var s = v.toFixed(2).replace(/\.00$/, '');
+    var parts = s.split('.');
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return parts.join('.');
+  }
+
+  function greeting(hour) {
+    if (hour < 5) return '夜深了';
+    if (hour < 9) return '早上好';
+    if (hour < 12) return '上午好';
+    if (hour < 14) return '中午好';
+    if (hour < 18) return '下午好';
+    return '晚上好';
+  }
+
+  function appUrl(name) {
+    try { return new URL('../' + name + '/', location.href).href; }
+    catch (e) { return '../' + name + '/'; }
+  }
+
+  function getNum(key) {
+    try { return Number(localStorage.getItem(key)) || 0; } catch (e) { return 0; }
+  }
+
+  // 只读解析，解析失败不会写入任何数据
+  function readJSON(key) {
+    var raw;
+    try { raw = localStorage.getItem(key); }
+    catch (e) { return { ok: false, empty: false, value: null }; }
+    if (raw === null || raw === undefined) return { ok: true, empty: true, value: null };
+    try { return { ok: true, empty: false, value: JSON.parse(raw) }; }
+    catch (e) { return { ok: false, empty: false, value: null }; }
+  }
+
   function toast(msg) {
     var el = $('toast');
     el.textContent = msg;
@@ -228,10 +395,8 @@
   }
 
   function stamp() {
-    var d = new Date();
-    var p = function (n) { return String(n).padStart(2, '0'); };
-    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
-      '-' + p(d.getHours()) + p(d.getMinutes());
+    var p = bjParts();
+    return p.y + '-' + p.m + '-' + p.d + '-' + pad2(p.h) + p.min;
   }
 
   function download(text, filename) {
@@ -431,7 +596,7 @@
 
     $('count').textContent = keys.length;
     $('size').textContent = fmt(total);
-    $('origin').textContent = location.host;
+    $('origin').textContent = '数据备份中心 · ' + location.host;
   }
 
   function refreshIdbCount() {
@@ -441,10 +606,380 @@
     }).catch(function () { $('idbCount').textContent = '?'; });
   }
 
+  /* ---------------- 今日工作台（只读汇总） ---------------- */
+
+  function baseCard(app, name, short, color) {
+    return {
+      app: app, name: name, short: short, color: color, url: appUrl(app),
+      value: '—', cap: '', detail: '', tone: '', active: false
+    };
+  }
+
+  function lifeStatus(today, hour) {
+    var card = baseCard('LifeLog', 'LifeLog', '生', '#7BA37A');
+    var out = { card: card, reminders: [] };
+    var r = readJSON('lifelog.v1');
+    if (!r.ok) {
+      card.tone = 'bad'; card.cap = '数据读取异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'LifeLog 数据读取异常，先不要在该应用里保存，请用下方备份恢复。', app: 'LifeLog' });
+      return out;
+    }
+    var state = r.value;
+    if (!state) { card.cap = '还没有数据'; card.detail = '打开应用开始记录'; return out; }
+    if (!Array.isArray(state.entries) || !Array.isArray(state.programs)) {
+      card.tone = 'bad'; card.cap = '数据结构异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'LifeLog 数据结构异常，先不要在该应用里保存，请用下方备份恢复。', app: 'LifeLog' });
+      return out;
+    }
+    var archived = {};
+    state.programs.forEach(function (p) { if (p && p.archived) archived[p.id] = 1; });
+
+    var onDay = state.entries.filter(function (e) {
+      return e && e.date === today && !archived[e.programId];
+    });
+    var all = [];
+    onDay.forEach(function (e) {
+      (e.deliverables || []).forEach(function (d) { if (d) all.push(d); });
+    });
+    var recorded = all.filter(function (d) { return typeof d.completion === 'number'; }).length;
+    var done = all.filter(function (d) { return typeof d.completion === 'number' && d.completion >= 1; }).length;
+
+    var recent = null;
+    state.entries.forEach(function (e) {
+      if (!e || !e.date || e.date > today || archived[e.programId]) return;
+      var rated = (e.deliverables || []).filter(function (d) { return d && typeof d.completion === 'number'; });
+      if (!rated.length) return;
+      if (!recent || e.date > recent.date) recent = e;
+    });
+    var recentName = '';
+    if (recent) {
+      var program = state.programs.find(function (p) { return p.id === recent.programId; });
+      recentName = program ? program.name : '';
+    }
+
+    if (!all.length) {
+      card.cap = '今日无计划';
+      card.detail = recent ? '最近 ' + shortDate(recent.date) + ' · ' + recentName : '还没有训练记录';
+    } else {
+      card.value = recorded + '/' + all.length;
+      card.cap = '今日交付物';
+      card.detail = '已完成 ' + done + ' 项' +
+        (recent && recent.date !== today ? ' · 最近 ' + shortDate(recent.date) : '');
+      card.active = recorded > 0;
+      if (!recorded) card.tone = 'warn';
+      if (hour >= 20 && !recorded) {
+        out.reminders.push({ tone: 'warn', text: 'LifeLog 今天有 ' + all.length + ' 个交付物，还没有记录完成情况。', app: 'LifeLog' });
+      }
+    }
+    return out;
+  }
+
+  function timeStatus(today, hour) {
+    var card = baseCard('TimeLog', 'TimeLog', '工', '#E05B70');
+    var out = { card: card, reminders: [] };
+    var r = readJSON('worklog_logs');
+    if (!r.ok) {
+      card.tone = 'bad'; card.cap = '数据读取异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'TimeLog 数据读取异常，先不要在该应用里保存，请用下方备份恢复。', app: 'TimeLog' });
+      return out;
+    }
+    if (!r.value) { card.cap = '还没有记录'; card.detail = '打开应用开始记录'; return out; }
+    if (!Array.isArray(r.value)) {
+      card.tone = 'bad'; card.cap = '数据结构异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'TimeLog 数据结构异常，先不要在该应用里保存，请用下方备份恢复。', app: 'TimeLog' });
+      return out;
+    }
+    var logs = r.value;
+    var done = logs.filter(function (l) { return l && l.date === today && l.status === 'done'; });
+    var plans = logs.filter(function (l) { return l && l.date === today && l.status === 'plan'; });
+    var hours = done.reduce(function (sum, l) { return sum + (Number(l.duration) || 0); }, 0);
+
+    var recent = null;
+    logs.forEach(function (l) {
+      if (!l || !l.date || l.date > today || l.status !== 'done') return;
+      if (!recent || l.date > recent.date ||
+        (l.date === recent.date && (Number(l.createdAt) || 0) > (Number(recent.createdAt) || 0))) {
+        recent = l;
+      }
+    });
+
+    if (!done.length && !plans.length) {
+      card.cap = '今日无记录';
+      card.detail = recent ? '最近 ' + shortDate(recent.date) + ' · ' + String(recent.task || '') : '还没有工作记录';
+    } else {
+      card.value = done.length ? hours + 'h' : '—';
+      card.cap = done.length ? '今日 ' + done.length + ' 条记录' : '今天还没记录工时';
+      card.detail = (plans.length ? plans.length + ' 项计划待完成' : '今日计划已全部完成') +
+        (recent && recent.date !== today ? ' · 最近 ' + shortDate(recent.date) : '');
+      card.active = done.length > 0;
+      if (!done.length || (hour >= 21 && plans.length)) card.tone = 'warn';
+      if (hour >= 21 && plans.length) {
+        out.reminders.push({ tone: 'warn', text: 'TimeLog 还有 ' + plans.length + ' 项今天的计划没有标记完成。', app: 'TimeLog' });
+      }
+    }
+    return out;
+  }
+
+  function spendStatus(today, hour) {
+    var card = baseCard('SpendLog', 'SpendLog', '¥', '#5B87FF');
+    var out = { card: card, reminders: [] };
+    var r = readJSON('suishou_jizhang_v1');
+    if (!r.ok) {
+      card.tone = 'bad'; card.cap = '数据读取异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'SpendLog 数据读取异常，先不要在该应用里保存，请用下方备份恢复。', app: 'SpendLog' });
+      return out;
+    }
+    var recs = r.value && Array.isArray(r.value.records) ? r.value.records : [];
+    if (!recs.length) { card.cap = '还没有账目'; card.detail = '打开应用记一笔'; return out; }
+
+    var month = today.slice(0, 7);
+    var todayRecs = [];
+    var todaySum = 0;
+    var monthSum = 0;
+    var recent = null;
+    recs.forEach(function (x) {
+      if (!x || !x.date || x.date > today) return;
+      if (String(x.date).slice(0, 7) === month) monthSum += Number(x.amount) || 0;
+      if (x.date === today) { todayRecs.push(x); todaySum += Number(x.amount) || 0; }
+      if (!recent || x.date > recent.date ||
+        (x.date === recent.date && (Number(x.createdAt) || 0) > (Number(recent.createdAt) || 0))) {
+        recent = x;
+      }
+    });
+
+    card.value = todayRecs.length ? '¥' + money(todaySum) : '—';
+    card.cap = todayRecs.length ? '今日 ' + todayRecs.length + ' 笔' : '今天还没记账';
+    card.detail = '本月 ¥' + money(monthSum) + (recent ? ' · 最近 ' + shortDate(recent.date) : '');
+    card.active = todayRecs.length > 0;
+    if (!todayRecs.length && hour >= 21) {
+      card.tone = 'warn';
+      out.reminders.push({ tone: 'warn', text: 'SpendLog 今天还没有记账，别忘了补一笔。', app: 'SpendLog' });
+    }
+    return out;
+  }
+
+  function techStatus(today) {
+    var card = baseCard('TechLog', 'TechLog', '学', '#3FBFB4');
+    var out = { card: card, reminders: [] };
+    var r = readJSON('faa_srs_cards');
+    if (!r.ok) {
+      card.tone = 'bad'; card.cap = '数据读取异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'TechLog 数据读取异常，先不要在该应用里保存，请用下方备份恢复。', app: 'TechLog' });
+      return out;
+    }
+    if (!r.value) { card.cap = '暂无卡片'; card.detail = '打开应用导入或新建卡片'; return out; }
+    if (!Array.isArray(r.value)) {
+      card.tone = 'bad'; card.cap = '数据结构异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'TechLog 数据结构异常，先不要在该应用里保存，请用下方备份恢复。', app: 'TechLog' });
+      return out;
+    }
+    var cards = r.value;
+    if (!cards.length) { card.cap = '暂无卡片'; card.detail = '打开应用导入或新建卡片'; return out; }
+
+    var due = 0;
+    var reviewedToday = 0;
+    var lastDate = '';
+    cards.forEach(function (c) {
+      if (!c) return;
+      if (c.due && c.due <= today) due += 1;
+      if (c.lastReviewed && c.lastReviewed <= today && c.lastReviewed > lastDate) lastDate = c.lastReviewed;
+      var log = Array.isArray(c.reviewLog) ? c.reviewLog : [];
+      log.forEach(function (x) {
+        if (!x || !x.date || x.date > today) return;
+        if (x.date === today) reviewedToday += 1;
+        if (x.date > lastDate) lastDate = x.date;
+      });
+    });
+
+    card.value = String(due);
+    card.cap = '今日到期卡片';
+    card.detail = '共 ' + cards.length + ' 张' +
+      (reviewedToday ? ' · 今日复习 ' + reviewedToday + ' 次' : (lastDate ? ' · 最近 ' + shortDate(lastDate) : ''));
+    card.active = reviewedToday > 0;
+    if (due > 0) {
+      card.tone = 'warn';
+      out.reminders.push({ tone: 'info', text: 'TechLog 有 ' + due + ' 张卡片今天到期。', app: 'TechLog' });
+    }
+    return out;
+  }
+
+  function tradeStatus(today) {
+    var card = baseCard('TradingLog', 'TradingLog', '交', '#D9A441');
+    var out = { card: card, reminders: [] };
+    var r = readJSON('shouze.trading.journal.v1');
+    if (!r.ok) {
+      card.tone = 'bad'; card.cap = '数据读取异常'; card.detail = '先到下方备份恢复';
+      out.reminders.push({ tone: 'danger', text: 'TradingLog 数据读取异常，先不要在该应用里保存，请用下方备份恢复。', app: 'TradingLog' });
+      return out;
+    }
+    var plans = r.value && Array.isArray(r.value.plans) ? r.value.plans : [];
+    if (!plans.length) { card.cap = '暂无计划'; card.detail = '打开应用制定交易计划'; return out; }
+
+    var plannedCount = 0;
+    var latest = null;
+    var oldest = null;
+    plans.forEach(function (p) {
+      if (!p) return;
+      var ts = Date.parse(p.createdAt);
+      if (isNaN(ts)) ts = 0;
+      if (!latest || ts > latest.ts) latest = { ts: ts, plan: p };
+      if (p.status === 'planned') {
+        plannedCount += 1;
+        if (!oldest || ts < oldest.ts) oldest = { ts: ts, plan: p };
+      }
+    });
+
+    card.value = String(plannedCount);
+    card.cap = '待执行计划';
+    card.detail = latest ? '最近 ' + shortDate(bjDateStr(latest.ts)) + ' · ' + String(latest.plan.symbol || '') : '';
+    card.active = Boolean(latest && bjDateStr(latest.ts) === today);
+    if (oldest) {
+      var age = dayDiff(bjDateStr(oldest.ts), today);
+      if (age >= 14) {
+        out.reminders.push({ tone: 'info', text: 'TradingLog 有 ' + plannedCount + ' 个计划待执行，最早的已放了 ' + age + ' 天。', app: 'TradingLog' });
+      }
+    }
+    return out;
+  }
+
+  function renderHero() {
+    var p = bjParts();
+    var date = p.y + '-' + p.m + '-' + p.d;
+    $('hello').textContent = greeting(p.h);
+    $('dateline').textContent = '北京时间 ' + p.y + '年' + Number(p.m) + '月' + Number(p.d) + '日 ' +
+      weekdayCN(date) + ' · ' + pad2(p.h) + ':' + p.min;
+  }
+
+  function renderWorkbench() {
+    var p = bjParts();
+    var today = p.y + '-' + p.m + '-' + p.d;
+    renderHero();
+
+    var results = [lifeStatus(today, p.h), timeStatus(today, p.h), spendStatus(today, p.h), techStatus(today), tradeStatus(today)];
+    var cards = results.map(function (x) { return x.card; });
+    var reminders = [];
+    results.forEach(function (x) { reminders = reminders.concat(x.reminders); });
+
+    // 备份是否超期
+    var last = Math.max(getNum('__lastBackupAt'), getNum('__autoBackupAt'));
+    if (!last) {
+      reminders.push({ tone: 'danger', text: '还没有备份记录，建议现在点一次「一键备份全部数据」。' });
+    } else {
+      var gap = dayDiff(bjDateStr(last), today);
+      if (gap > 7) reminders.push({ tone: 'warn', text: '已有 ' + gap + ' 天没有备份，建议现在补一次。' });
+    }
+
+    // 数据救援副本
+    var rescueCount = 0;
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (k && k.indexOf('__rescue.') === 0) rescueCount += 1;
+      }
+    } catch (e) { /* 忽略读取异常 */ }
+    if (rescueCount) {
+      reminders.push({ tone: 'warn', text: '检测到 ' + rescueCount + ' 份数据救援副本，说明曾出现读取异常，建议先做一次完整备份。' });
+    }
+
+    var rank = { danger: 3, warn: 2, info: 1 };
+    reminders.sort(function (a, b) { return (rank[b.tone] || 0) - (rank[a.tone] || 0); });
+
+    var active = cards.filter(function (c) { return c.active; }).length;
+    var hint = $('heroHint');
+    hint.innerHTML = '';
+    if (active) {
+      hint.appendChild(document.createTextNode('今天已有 '));
+      var b = document.createElement('b');
+      b.textContent = active;
+      hint.appendChild(b);
+      hint.appendChild(document.createTextNode(' 个应用更新' +
+        (active < cards.length ? '，还有 ' + (cards.length - active) + ' 个没开始。' : '，全部到齐。')));
+    } else {
+      hint.textContent = '今天还没有记录，从一件小事开始吧。';
+    }
+
+    var grid = $('appGrid');
+    grid.innerHTML = '';
+    cards.forEach(function (c, idx) {
+      var a = document.createElement('a');
+      a.className = 'app' + (c.tone ? ' ' + c.tone : '') +
+        (idx === cards.length - 1 && cards.length % 2 ? ' wide' : '');
+      a.href = c.url;
+      a.setAttribute('aria-label', '打开 ' + c.name);
+
+      var top = document.createElement('div');
+      top.className = 'top';
+      var ico = document.createElement('span');
+      ico.className = 'ico';
+      ico.textContent = c.short;
+      ico.style.color = c.color;
+      ico.style.background = c.color + '22';
+      var nm = document.createElement('span');
+      nm.className = 'an';
+      nm.textContent = c.name;
+      var go = document.createElement('span');
+      go.className = 'go';
+      go.textContent = '›';
+      top.appendChild(ico);
+      top.appendChild(nm);
+      top.appendChild(go);
+
+      var av = document.createElement('div');
+      av.className = 'av' + (c.value === '—' ? ' muted' : '');
+      av.textContent = c.value;
+      var ac = document.createElement('div');
+      ac.className = 'ac';
+      ac.textContent = c.cap;
+      var ad = document.createElement('div');
+      ad.className = 'ad';
+      ad.textContent = c.detail || '';
+
+      a.appendChild(top);
+      a.appendChild(av);
+      a.appendChild(ac);
+      a.appendChild(ad);
+      grid.appendChild(a);
+    });
+    $('appsHint').textContent = cards.length + ' 个应用';
+
+    var list = $('reminderList');
+    list.innerHTML = '';
+    var hintEl = $('reminderHint');
+    if (!reminders.length) {
+      var ok = document.createElement('li');
+      ok.className = 'ritem';
+      var okDot = document.createElement('i');
+      okDot.className = 'dot';
+      var okText = document.createElement('span');
+      okText.textContent = '今天没有需要处理的事，数据看起来都很正常。';
+      ok.appendChild(okDot);
+      ok.appendChild(okText);
+      list.appendChild(ok);
+      hintEl.textContent = '无';
+    } else {
+      reminders.slice(0, 6).forEach(function (item) {
+        var li = document.createElement('li');
+        li.className = 'ritem ' + (item.tone || 'info');
+        var dot = document.createElement('i');
+        dot.className = 'dot';
+        var span = document.createElement('span');
+        span.textContent = item.text;
+        li.appendChild(dot);
+        li.appendChild(span);
+        if (item.app) {
+          var link = document.createElement('a');
+          link.href = appUrl(item.app);
+          link.textContent = '打开';
+          li.appendChild(link);
+        }
+        list.appendChild(li);
+      });
+      hintEl.textContent = reminders.length + ' 条';
+    }
+  }
+
   function renderStatus() {
-    var lastManual = Number(localStorage.getItem('__lastBackupAt')) || 0;
-    var lastAuto = Number(localStorage.getItem('__autoBackupAt')) || 0;
-    var last = Math.max(lastManual, lastAuto);
+    var last = Math.max(getNum('__lastBackupAt'), getNum('__autoBackupAt'));
     var timeEl = $('lastTime');
     var hintEl = $('lastHint');
     if (!last) {
@@ -453,11 +988,8 @@
       hintEl.textContent = '建议现在先点一次「一键备份全部数据」，把文件保存到电脑或网盘。';
       return;
     }
-    var days = Math.floor((Date.now() - last) / 86400000);
-    var d = new Date(last);
-    var p = function (n) { return String(n).padStart(2, '0'); };
-    var label = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
-      ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    var days = dayDiff(bjDateStr(last), bjToday());
+    var label = bjFull(last);
     timeEl.textContent = label + (days <= 0 ? '（今天）' : '（' + days + ' 天前）');
     timeEl.className = days > 7 ? 'warn' : '';
     hintEl.textContent = days > 7
@@ -517,7 +1049,11 @@
       var dbs = obj && obj.indexedDB ? Object.keys(obj.indexedDB) : [];
       if (!keys.length && !dbs.length) return toast('备份里没有数据');
 
-      var when = obj.exportedAt ? new Date(obj.exportedAt).toLocaleString() : '未知时间';
+      var when = '未知时间';
+      if (obj.exportedAt) {
+        var exportedTs = Date.parse(obj.exportedAt);
+        if (!isNaN(exportedTs)) when = bjFull(exportedTs) + '（北京时间）';
+      }
       var ok = confirm(
         '将写入 ' + keys.length + ' 个数据项' +
         (dbs.length ? '、覆盖 ' + dbs.length + ' 个数据库' : '') +
@@ -547,7 +1083,16 @@
 
   render();
   refreshIdbCount();
+  renderWorkbench();
   renderStatus();
+
+  // 回到页面时刷新今日概览，跨天也能更新
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) {
+      renderWorkbench();
+      renderStatus();
+    }
+  });
 })();
 </script>
 </body>
